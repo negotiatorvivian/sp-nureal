@@ -52,7 +52,7 @@ class SATProblem(object):
         self._batch_mask_tuple = self._compute_batch_map(self._batch_variable_map, self._batch_function_map)
         self._graph_mask_tuple = self._compute_graph_mask(self._graph_map, self._batch_variable_map,
                                                           self._batch_function_map,
-                                                         degree = True)
+                                                          degree = True)
         '''# 所有edge_feature为正的子句'''
         self._pos_mask_tuple = self._compute_graph_mask(self._graph_map, self._batch_variable_map,
                                                         self._batch_function_map,
@@ -86,10 +86,10 @@ class SATProblem(object):
         graph_map = graph_map.repeat(1, batch_replication) + ind.repeat(2, 1) * torch.tensor(
             [[variable_num], [function_num]], dtype = torch.int32, device = self._device)
 
-        ind = torch.arange(batch_replication, dtype = torch.int32, device = self._device).unsqueeze(1).\
+        ind = torch.arange(batch_replication, dtype = torch.int32, device = self._device).unsqueeze(1). \
             repeat(1, variable_num).view(1, -1)
         batch_variable_map = batch_variable_map.repeat(batch_replication) + ind * batch_size
-        ind = torch.arange(batch_replication, dtype = torch.int32, device = self._device).unsqueeze(1).\
+        ind = torch.arange(batch_replication, dtype = torch.int32, device = self._device).unsqueeze(1). \
             repeat(1, function_num).view(1, -1)
         batch_function_map = batch_function_map.repeat(batch_replication) + ind * batch_size
         edge_feature = edge_feature.repeat(batch_replication, 1)
@@ -314,39 +314,34 @@ class SATProblem(object):
         """计算与变量 n 同时出现在某一个子句中的变量集合"""
         adj_lists = defaultdict(set)
         node_adj_lists = []
-        self.nodes = ((self._signed_mask_tuple[0]._indices()[0].to(torch.float) + 1) * self._edge_feature.squeeze(1))\
+        self.nodes = ((self._signed_mask_tuple[0]._indices()[0].to(torch.float) + 1) * self._edge_feature.squeeze(1)) \
             .to(torch.long)
-        # if self._device.type == 'cuda':
-        #     graph_map = self._graph_map.detach().cpu().numpy()
-        #     self.nodes = self.nodes.to(self._device)
-        for i in range(1, self._variable_num + 1):
-            for j in [i, -i]:
-                indices = self._graph_map[1][np.argwhere(self.nodes == j)][0].to(torch.long)
-                edge_indices = np.argwhere(self._signed_mask_tuple[2].to_dense()[indices] != 0)[1]
-                # relations = np.argwhere(self._vf_mask_tuple[1].to_dense()[indices] > 0)[1]
-
-                relations = set([i + self._variable_num if i < 0 else i + self._variable_num - 1 for i in
-                                 self.nodes[edge_indices].numpy()])
-                index = j + self._variable_num if j < 0 else j + self._variable_num - 1
-                node_adj_lists.extend(list(relations - set([index])))
-                if len(relations) < 2:
-                    continue
-                adj_lists[index] = relations - set([index])
+        for j in range(self._variable_num):
+            # for j in [i, -i]:
+            indices = self._graph_map[1][np.argwhere(torch.abs(self.nodes) == j + 1)][0].to(torch.long)
+            edge_indices = np.argwhere(self._signed_mask_tuple[2].to_dense()[indices] != 0)[1]
+            relations = set([abs(i) - 1 for i in self.nodes[edge_indices].numpy()])
+            # index = j + self._variable_num if j < 0 else j + self._variable_num - 1
+            # node_adj_lists.extend(list(relations - set([index])))
+            if len(relations) < 2:
+                continue
+            adj_lists[j] = relations - set([j])
         return adj_lists, node_adj_lists
 
-    def _post_process_predictions(self, prediction, answers = None):
-
+    def _post_process_predictions(self, prediction, is_training = True):
+        """计算 cnf 中可满足的子句数"""
         res, activations = self._cnf_evaluator(prediction, self._graph_map, self._batch_variable_map,
-                                                self._batch_function_map, self._edge_feature,
-                                                self._vf_mask_tuple[1], self._graph_mask_tuple[3],
-                                                self._active_variables, self._active_functions)
+                                               self._batch_function_map, self._edge_feature,
+                                               self._vf_mask_tuple[1], self._graph_mask_tuple[3],
+                                               self._active_variables, self._active_functions)
         trained_vars, functions, variables = activations
-        self._active_functions[functions] = 0
-        self._active_variables[variables] = 0
         if res is None:
             return None
         output, unsat_clause_num, graph_map, clause_values = [a.detach().cpu().numpy() for a in res]
-        print('unsat_clause_num:', unsat_clause_num)
+        if not is_training:
+            self._active_functions[functions] = 0
+            self._active_variables[variables] = 0
+            print('unsat_clause_num:', unsat_clause_num)
         '''若res不为空, trained_vars表示所有不满足子句中出现过的变量'''
         return trained_vars
 
@@ -378,7 +373,8 @@ class PropagatorDecimatorSolverBase(nn.Module):
         self._module_list.append(self._propagator)
         self._module_list.append(self._predictor)
 
-        self._global_step = nn.Parameter(torch.tensor([0], dtype=torch.float, device=self._device), requires_grad=False)
+        self._global_step = nn.Parameter(torch.tensor([0], dtype = torch.float, device = self._device),
+                                         requires_grad = False)
         self._name = name
         self._local_search_iterations = local_search_iterations
         self._epsilon = epsilon
@@ -485,7 +481,7 @@ class PropagatorDecimatorSolverBase(nn.Module):
         function_prediction = None
         if prediction[1] is not None:
             flag = torch.mm(sat_problem._batch_mask_tuple[2], batch_flag)
-            function_prediction = (flag * prediction[1]).view(sat_problem._batch_replication, -1).sum(dim = 0)\
+            function_prediction = (flag * prediction[1]).view(sat_problem._batch_replication, -1).sum(dim = 0) \
                 .unsqueeze(1)
 
         return (variable_prediction, function_prediction), new_propagator_state, new_decimator_state
@@ -563,7 +559,8 @@ class PropagatorDecimatorSolverBase(nn.Module):
 
 
 class SPNueralBase:
-    def __init__(self, dimacs_file, device, epoch_replication = 3, batch_replication = 1, epoch = 100, batch_size = 2000,
+    def __init__(self, dimacs_file, device, epoch_replication = 3, batch_replication = 1, epoch = 100,
+                 batch_size = 2000,
                  hidden_dimension = 160, feature_dim = 100, train_outer_recurrence_num = 5, alpha = 0.2, use_cuda =
                  True):
         self._use_cuda = use_cuda and torch.cuda.is_available()
@@ -620,7 +617,8 @@ class SPNueralBase:
                 losses[:, epoch, rep] = SPModel.run_cora(train_loader, rep, epoch, self._model_list,
                                                          self._loss_evaluator, self._device, self._batch_replication,
                                                          self._hidden_dimension, self._feature_dim,
-                                                         self._train_outer_recurrence_num, self._use_cuda, is_train, False)
+                                                         self._train_outer_recurrence_num, self._use_cuda, is_train,
+                                                         False)
 
                 if self._use_cuda:
                     torch.cuda.empty_cache()
@@ -681,13 +679,13 @@ class SPNueralBase:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('dataset_path', help='Path to datasets')
-    parser.add_argument('last_model_path', help='Path to save the previous model')
-    parser.add_argument('best_model_path', help='Path to save the best model')
-    parser.add_argument('-g', '--gpu_mode', help='Run on GPU', action='store_true')
-    parser.add_argument('-p', '--predict', help='Run prediction', action='store_true')
-    parser.add_argument('-l', '--load_model', help='Load the previous model')
-    parser.add_argument('-lp', '--load_model_path', help='Path to load the previous model')
+    parser.add_argument('dataset_path', help = 'Path to datasets')
+    parser.add_argument('last_model_path', help = 'Path to save the previous model')
+    parser.add_argument('best_model_path', help = 'Path to save the best model')
+    parser.add_argument('-g', '--gpu_mode', help = 'Run on GPU', action = 'store_true')
+    parser.add_argument('-p', '--predict', help = 'Run prediction', action = 'store_true')
+    parser.add_argument('-l', '--load_model', help = 'Load the previous model')
+    parser.add_argument('-lp', '--load_model_path', help = 'Path to load the previous model')
 
     args = parser.parse_args()
     try:
@@ -704,4 +702,3 @@ if __name__ == '__main__':
             trainer.train(args.last_model_path, args.best_model_path)
     except:
         print(traceback.format_exc())
-

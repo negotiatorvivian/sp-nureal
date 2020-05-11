@@ -6,9 +6,8 @@ import numpy as np
 
 
 class Encoder(nn.Module):
-    def __init__(self, features, feature_dim,
-            embed_dim, adj_lists, node_adj_lists, aggregator,
-            num_sample = 10, base_model = None, gru = False, gru_hidden_dim = 300, cuda = False):
+    def __init__(self, features, feature_dim, embed_dim, adj_lists, node_adj_lists, aggregator, num_sample = 10,
+                 base_model = None, gru = False, gru_hidden_dim = 300, cuda = False):
         super(Encoder, self).__init__()
         '''用sp模型初始化的data作为特征值的权重'''
         self.features = features
@@ -31,8 +30,6 @@ class Encoder(nn.Module):
         init.xavier_uniform_(self.weight)
 
     def forward(self, nodes):
-        # """获取与n相关的节点m的相关节点"""
-        # nodes = self.node_adj_lists[list(np.array(nodes))]
         """获取与n相关的节点m的相关节点编码"""
         neigh_feats = self.aggregator.forward(nodes, [self.adj_lists[int(node)] for node in nodes], self.num_sample)
         if not self.gru:

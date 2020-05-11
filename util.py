@@ -113,7 +113,7 @@ class FactorGraphDataset(data.Dataset):
         edge_feature = np.sign(np.array(input_data[1], dtype=np.float32))
         graph_map = np.stack((variable_ind, function_ind))
 
-        misc_data = []
+        answers = []
         if len(input_data) > 4:
             misc_data = np.array(input_data[4])
             if len(misc_data) > 0:

@@ -39,9 +39,6 @@ class MeanAggregator(nn.Module):
             mask = mask.cuda()
         num_neigh = mask.sum(1, keepdim = True)
         mask = mask.div(num_neigh)
-        mini = min(unique_nodes_list)
-        if mini < 0:
-            unique_nodes_list = [i + abs(mini) if i < 0 else i + abs(mini) - 1 for i in unique_nodes_list]
 
         '''self.features 是 一个nn.Embedding, 其权重 weight 为 [function_num, variable_num]'''
         if self.cuda:
