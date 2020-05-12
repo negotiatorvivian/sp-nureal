@@ -85,15 +85,16 @@ class SatCNFEvaluator(nn.Module):
             sat_vars = set(np.argwhere(sat_vars > 0)[1].numpy())
             '''相减后获得差集: 即可以确定值的变量 -> 变量所在的子句均为可满足子句'''
             self._sat = sat_vars - self._unsat
+            functions = set(np.argwhere(vf_mask.to_dense()[:, list(self._sat)])[0].numpy()) - set(
+                np.argwhere(vf_mask.to_dense()[:, list(unsat_vars)] > 0)[0].numpy())
+            functions = list(functions) if functions is not None else []
+            variables = list(set(np.argwhere(vf_mask.to_dense()[functions, :] > 0)[1].numpy()))
 
         '''最大可满足子句数'''
         max_sat = torch.mm(b_function_mask_transpose, all_ones)
         '''实际满足的子句数'''
         batch_values = torch.mm(b_function_mask_transpose, clause_values)
-        functions = set(np.argwhere(vf_mask.to_dense()[:, list(self._sat)])[0].numpy()) - set(
-            np.argwhere(vf_mask.to_dense()[:, list(unsat_vars)] > 0)[0].numpy())
-        functions = list(functions) if functions is not None else []
-        variables = list(set(np.argwhere(vf_mask.to_dense()[functions, :] > 0)[1].numpy()))
+
         if vf_mask is not None:
             return ((max_sat == batch_values).float(), max_sat - batch_values, graph_map, clause_values), \
                    (list(self._unsat), functions, variables)
@@ -107,7 +108,6 @@ class SatLossEvaluator(nn.Module):
         super(SatLossEvaluator, self).__init__()
         self._alpha = alpha
         self._device = device
-        self._eps = 1e-8 * torch.ones(1, device = self._device, requires_grad = False)
         self._max_coeff = 10.0
         self._loss_sharpness = 5
 
@@ -178,7 +178,7 @@ class SatLossEvaluator(nn.Module):
         return (variable_mask, variable_mask_transpose, function_mask, function_mask_transpose)
 
     def forward(self, variable_prediction, label, graph_map, batch_variable_map, batch_function_map, edge_feature,
-                meta_data, global_step):
+                meta_data, global_step, eps):
         """temperature"""
         coeff = torch.min(global_step.pow(self._alpha), torch.tensor([self._max_coeff], device = self._device))
         '''计算带有符号的变量与子句的编码'''
@@ -195,7 +195,7 @@ class SatLossEvaluator(nn.Module):
         '''平滑可微的求最大值方法  -> 最大值对应求逻辑表达式的析取值最大'''
         nominator = torch.mm(function_mask, weights * edge_values)
         denominator = torch.mm(function_mask, weights)
-        clause_value = denominator / torch.max(nominator, self._eps)
+        clause_value = denominator / torch.max(nominator, eps)
         clause_value = 1 + (clause_value - 1).pow(self._loss_sharpness)
         '''safe_log 操作防止出现无穷大值'''
-        return torch.mean(SatLossEvaluator.safe_log(clause_value, self._eps))
+        return torch.mean(SatLossEvaluator.safe_log(clause_value, eps))

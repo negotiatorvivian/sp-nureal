@@ -351,7 +351,8 @@ class PropagatorDecimatorSolverBase(nn.Module):
 
     def __init__(self, device, name, feature_dim, hidden_dimension,
                  agg_hidden_dimension = 100, func_hidden_dimension = 100, agg_func_dimension = 50,
-                 classifier_dimension = 50, local_search_iterations = 1000, epsilon = 0.05, pure_sp = True):
+                 classifier_dimension = 50, local_search_iterations = 1000, epsilon = 0.05, alpha = 0.1,
+                 pure_sp = True):
 
         super(PropagatorDecimatorSolverBase, self).__init__()
         self._device = device
@@ -369,6 +370,8 @@ class PropagatorDecimatorSolverBase(nn.Module):
         self._predictor = SurveyNeuralPredictor(device, hidden_dimension, self._predict_dimension, self._edge_dimension,
                                                 self._meta_dimension, agg_hidden_dimension, func_hidden_dimension,
                                                 agg_func_dimension, self._variable_classifier)
+        self._cnf_evaluator = solver.SatCNFEvaluator(device)
+        self._loss_evaluator = solver.SatLossEvaluator(alpha = alpha, device = self._device)
 
         self._module_list.append(self._propagator)
         self._module_list.append(self._predictor)
@@ -377,12 +380,19 @@ class PropagatorDecimatorSolverBase(nn.Module):
                                          requires_grad = False)
         self._name = name
         self._local_search_iterations = local_search_iterations
-        self._epsilon = epsilon
+        self._eps = 1e-8 * torch.ones(1, device = self._device, requires_grad = False)
         '''是否使用神经网络的 decimate 方法'''
         self._pure_sp = pure_sp
 
     def parameter_count(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def load(self, import_path_base):
+        self.load_state_dict(torch.load(os.path.join(import_path_base, self._name)))
+
+    def save(self, export_path_base):
+        """保存模型"""
+        torch.save(self.state_dict(), os.path.join(export_path_base, self._name))
 
     def forward(self, init_state, sat_problem, is_training = True, iteration_num = 1, check_termination = None,
                 simplify = True, batch_replication = 1):
@@ -542,6 +552,39 @@ class PropagatorDecimatorSolverBase(nn.Module):
         else:
             active[active[:, 0], 0] = (output[active[:, 0], 0] <= 0.5)
 
+    def _compute_evaluation_metrics(self, evaluator, prediction, label, graph_map,
+                                    batch_variable_map, batch_function_map, edge_feature, meta_data, vf_mask):
+        """交叉验证"""
+        output, _ = self._cnf_evaluator(variable_prediction = prediction, graph_map = graph_map,
+                                        batch_variable_map = batch_variable_map,
+                                        batch_function_map = batch_function_map,
+                                        edge_feature = edge_feature, vf_mask = vf_mask)
+
+        recall = torch.sum(label * ((output[0] > 0.5).float() - label).abs()) / torch.max(torch.sum(label), self._eps)
+        accuracy = evaluator((output[0] > 0.5).float(), label).unsqueeze(0)
+        loss_value = self._loss_evaluator(variable_prediction = prediction, label = label, graph_map = graph_map,
+                                          batch_variable_map = batch_variable_map,
+                                          batch_function_map = batch_function_map,
+                                          edge_feature = edge_feature, meta_data = meta_data,
+                                          global_step = self._global_step, eps = self._eps).unsqueeze(0)
+        return torch.cat([accuracy, recall, loss_value], 0)
+
+    def compute_loss(self, mode, prediction, label, graph_map, batch_variable_map, batch_function_map,
+                     edge_feature, meta_data = None, vf_mask = None):
+        if mode:
+            '''训练集'''
+            res = self._loss_evaluator(variable_prediction = prediction, label = label, graph_map = graph_map,
+                                       batch_variable_map = batch_variable_map, batch_function_map = batch_function_map,
+                                       edge_feature = edge_feature, meta_data = meta_data, global_step =
+                                       self._global_step, eps = self._eps)
+            return res
+        else:
+            '''验证集'''
+            evaluator = nn.L1Loss()
+            res = self._compute_evaluation_metrics(evaluator, prediction, label, graph_map, batch_variable_map,
+                                                   batch_function_map, edge_feature, meta_data, vf_mask)
+            return res.cpu().numpy()
+
     def get_init_state(self, graph_map, randomized, batch_replication = 1):
         """初始化变量子节点和子句子节点"""
 
@@ -559,13 +602,13 @@ class PropagatorDecimatorSolverBase(nn.Module):
 
 
 class SPNueralBase:
-    def __init__(self, dimacs_file, device, epoch_replication = 3, batch_replication = 1, epoch = 100,
-                 batch_size = 2000,
-                 hidden_dimension = 160, feature_dim = 100, train_outer_recurrence_num = 5, alpha = 0.2, use_cuda =
-                 True):
+    def __init__(self, dimacs_file, validate_file = None, epoch_replication = 3, batch_replication = 1, epoch = 100,
+                 batch_size = 2000, hidden_dimension = 160, feature_dim = 100, train_outer_recurrence_num = 5,
+                 alpha = 0.1, error_dim = 3, use_cuda = True):
         self._use_cuda = use_cuda and torch.cuda.is_available()
         '''读入数据路径'''
         self._dimacs_file = dimacs_file
+        self._validate_file = validate_file
 
         self._epoch_replication = epoch_replication
         self._batch_replication = batch_replication
@@ -579,86 +622,15 @@ class SPNueralBase:
         self._test_batch_limit = 40000
         self._max_cache_size = 100000
         self._train_outer_recurrence_num = train_outer_recurrence_num
-        self._device = device
+        self._device = torch.device('cuda') if self._use_cuda else torch.device('cpu')
         self._num_cores = multiprocessing.cpu_count()
+        self._error_dim = error_dim
         torch.set_num_threads(self._num_cores)
-        '''计算loss类'''
-        self._loss_evaluator = solver.SatLossEvaluator(alpha = alpha, device = self._device)
         '''初始化模型列表'''
         model_list = [PropagatorDecimatorSolverBase(self._device, "SP-Nueral", feature_dim, self._gru_hidden_dimension,
-                                                    pure_sp = False)]
+                                                    alpha = alpha, pure_sp = False)]
         '''将模型放到 GPU 上运行 如果 cuda 设备可用'''
         self._model_list = [self._set_device(model) for model in model_list]
-
-    def train(self, last_export_path_base = None, best_export_path_base = None, metric_index = 0, load_model = None,
-              train_epoch_size = 0, is_train = True):
-
-        train_loader = util.FactorGraphDataset.get_loader(
-            input_file = self._dimacs_file, limit = self._train_batch_limit,
-            hidden_dim = self._hidden_dimension, batch_size = self._batch_size, shuffle = True,
-            num_workers = self._num_cores, max_cache_size = self._max_cache_size,
-            epoch_size = train_epoch_size)
-
-        '''设置模型保存路径 若不存在 则创建该文件夹'''
-        if not os.path.exists(best_export_path_base):
-            os.makedirs(best_export_path_base)
-
-        if not os.path.exists(last_export_path_base):
-            os.makedirs(last_export_path_base)
-        losses = np.zeros((len(self._model_list), self._epoch, self._epoch_replication), dtype = np.float32)
-        for rep in range(self._epoch_replication):
-            '''# 在之前模型的基础上进行训练'''
-            if load_model == "best" and best_export_path_base is not None:
-                self._load(best_export_path_base)
-            elif load_model == "last" and last_export_path_base is not None:
-                self._load(last_export_path_base)
-            for epoch in range(self._epoch):
-                start_time = time.time()
-                losses[:, epoch, rep] = SPModel.run_cora(train_loader, rep, epoch, self._model_list,
-                                                         self._loss_evaluator, self._device, self._batch_replication,
-                                                         self._hidden_dimension, self._feature_dim,
-                                                         self._train_outer_recurrence_num, self._use_cuda, is_train,
-                                                         False)
-
-                if self._use_cuda:
-                    torch.cuda.empty_cache()
-                duration = time.time() - start_time
-                if last_export_path_base is not None:
-                    for (i, model) in enumerate(self._model_list):
-                        _module(model).save(last_export_path_base)
-                message = ''
-                for (i, model) in enumerate(self._model_list):
-                    name = _module(model)._name
-                    message += 'Step {:d}: {:s} loss={:5.5f} |'.format(_module(model)._global_step.int()[0], name,
-                                                                       losses[i, epoch, rep])
-
-                print('Rep {:2d}, Epoch {:2d}: {:s}'.format(rep + 1, epoch + 1, message))
-                print('Time spent: %s seconds' % duration)
-                # if best_export_path_base is not None:
-                #     for (i, model) in enumerate(self._model_list):
-                #         if errors[metric_index, i, epoch, rep] < best_errors[i]:
-                #             best_errors[i] = errors[metric_index, i, epoch, rep]
-                #             _module(model).save(best_export_path_base)
-
-        if self._use_cuda:
-            torch.backends.cudnn.benchmark = False
-
-    def predict(self, out_file, import_path_base = None, epoch_replication = 1, is_train = False):
-        test_loader = util.FactorGraphDataset.get_loader(
-            input_file = self._dimacs_file, limit = self._test_batch_limit,
-            hidden_dim = self._hidden_dimension, batch_size = self._batch_size, shuffle = False,
-            num_workers = self._num_cores, max_cache_size = self._max_cache_size,
-            batch_replication = epoch_replication)
-
-        if import_path_base is not None:
-            self._load(import_path_base)
-
-        SPModel.run_cora(test_loader, self._model_list, self._device, epoch_replication, self._epoch,
-                         self._hidden_dimension, self._feature_dim, self._batch_size, self._use_cuda,
-                         is_train = is_train)
-
-        if self._use_cuda:
-            torch.cuda.empty_cache()
 
     def _set_device(self, model):
         """设置使用设备"""
@@ -676,29 +648,138 @@ class SPNueralBase:
         for model in self._model_list:
             _module(model).save(export_path_base)
 
+    def _reset_global_step(self):
+        """重新计数训练轮数"""
+        for model in self._model_list:
+            _module(model)._global_step.data = torch.tensor([0], dtype = torch.float, device = self._device)
+
+    def _test_epoch(self, validation_loader, is_train = False, batch_replication = 1):
+        """用于做模型的验证"""
+        with torch.no_grad():
+            error = np.zeros((self._error_dim, len(self._model_list)), dtype = np.float32)
+            errors = SPModel.test_batch(validation_loader, error, self._model_list, self._device, batch_replication,
+                                        self._use_cuda, is_train, False)
+            return errors
+
+    def train(self, last_export_path_base = None, best_export_path_base = None, metric_index = 0, load_model = None,
+              train_epoch_size = 0, reset_step = False, is_train = True):
+        """训练集"""
+        train_loader = util.FactorGraphDataset.get_loader(
+            input_file = self._dimacs_file, limit = self._train_batch_limit,
+            hidden_dim = self._hidden_dimension, batch_size = self._batch_size, shuffle = True,
+            num_workers = self._num_cores, max_cache_size = self._max_cache_size,
+            epoch_size = train_epoch_size)
+        '''验证集'''
+        validation_loader = util.FactorGraphDataset.get_loader(
+            input_file = self._validate_file, limit = self._train_batch_limit,
+            hidden_dim = self._hidden_dimension, batch_size = self._batch_size, shuffle = False,
+            num_workers = self._num_cores, max_cache_size = self._max_cache_size)
+
+        '''设置模型保存路径 若不存在 则创建该文件夹'''
+        if not os.path.exists(best_export_path_base):
+            os.makedirs(best_export_path_base)
+
+        if not os.path.exists(last_export_path_base):
+            os.makedirs(last_export_path_base)
+        losses = np.zeros((len(self._model_list), self._epoch, self._epoch_replication), dtype = np.float32)
+        errors = np.zeros((self._error_dim, len(self._model_list), self._epoch, self._epoch_replication),
+                          dtype = np.float32)
+        best_errors = np.repeat(np.inf, len(self._model_list))
+
+        for rep in range(self._epoch_replication):
+            '''在之前模型的基础上进行训练'''
+            if load_model == "best" and best_export_path_base is not None:
+                self._load(best_export_path_base)
+            elif load_model == "last" and last_export_path_base is not None:
+                self._load(last_export_path_base)
+            if reset_step:
+                self._reset_global_step()
+            for epoch in range(self._epoch):
+                start_time = time.time()
+                total_loss = np.zeros(len(self._model_list), dtype = np.float32)
+                losses[:, epoch, rep] = SPModel.train_batch(train_loader, total_loss, rep, epoch, self._model_list,
+                                                            self._device, self._batch_replication,
+                                                            self._hidden_dimension, self._feature_dim,
+                                                            self._train_outer_recurrence_num, self._use_cuda, is_train,
+                                                            True)
+
+                if self._use_cuda:
+                    torch.cuda.empty_cache()
+                '''验证过程'''
+                errors[:, :, epoch, rep] = self._test_epoch(validation_loader, not is_train, 1)
+                duration = time.time() - start_time
+                if last_export_path_base is not None:
+                    '''存储最后一次生成的模型'''
+                    for (i, model) in enumerate(self._model_list):
+                        _module(model).save(last_export_path_base)
+                if best_export_path_base is not None:
+                    '''存储最佳的模型'''
+                    for (i, model) in enumerate(self._model_list):
+                        if errors[metric_index, i, epoch, rep] < best_errors[i]:
+                            best_errors[i] = errors[metric_index, i, epoch, rep]
+                            _module(model).save(best_export_path_base)
+                if self._use_cuda:
+                    torch.cuda.empty_cache()
+                message = ''
+                for (i, model) in enumerate(self._model_list):
+                    name = _module(model)._name
+                    message += 'Step {:d}: {:s} error={:s}, loss={:5.5f} |'. \
+                        format(_module(model)._global_step.int()[0],
+                               name, np.array_str(errors[:, i, epoch, rep].flatten()),
+                               losses[i, epoch, rep])
+
+                print('Rep {:2d}, Epoch {:2d}: {:s}'.format(rep + 1, epoch + 1, message))
+                print('Time spent: %s seconds' % duration)
+        if self._use_cuda:
+            torch.backends.cudnn.benchmark = False
+        if best_export_path_base is not None:
+            '''存储 loss 和 errors'''
+            base = os.path.relpath(best_export_path_base)
+            np.save(os.path.join(base, "losses"), losses, allow_pickle = False)
+            np.save(os.path.join(base, "errors"), errors, allow_pickle = False)
+            '''保存模型'''
+            self._save(best_export_path_base)
+
+    def predict(self, import_path_base = None, epoch_replication = 1, randomized = False):
+        """模型的预测功能"""
+        with torch.no_grad():
+            test_loader = util.FactorGraphDataset.get_loader(
+                input_file = self._dimacs_file, limit = self._test_batch_limit,
+                hidden_dim = self._hidden_dimension, batch_size = self._batch_size, shuffle = False,
+                num_workers = self._num_cores, max_cache_size = self._max_cache_size,
+                batch_replication = epoch_replication)
+            '''加载模型'''
+            if import_path_base is not None:
+                self._load(import_path_base)
+
+            SPModel.predict_batch(test_loader, self._model_list, self._device, epoch_replication, self._use_cuda,
+                                  randomized = randomized)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('dataset_path', help = 'Path to datasets')
-    parser.add_argument('last_model_path', help = 'Path to save the previous model')
-    parser.add_argument('best_model_path', help = 'Path to save the best model')
+    parser.add_argument('-tv', '--validate', help = 'Path to validation datasets')
+    parser.add_argument('-tl', '--last_model_path', help = 'Path to save the previous model')
+    parser.add_argument('-tb', '--best_model_path', help = 'Path to save the best model')
     parser.add_argument('-g', '--gpu_mode', help = 'Run on GPU', action = 'store_true')
     parser.add_argument('-p', '--predict', help = 'Run prediction', action = 'store_true')
     parser.add_argument('-l', '--load_model', help = 'Load the previous model')
-    parser.add_argument('-lp', '--load_model_path', help = 'Path to load the previous model')
+    parser.add_argument('-pl', '--load_model_path', help = 'Path to load the previous model')
 
     args = parser.parse_args()
     try:
-        if args.gpu_mode:
-            device = torch.device("cuda")
-            trainer = SPNueralBase(args.dataset_path, device = device)
-        else:
-            device = torch.device("cpu")
-            trainer = SPNueralBase(args.dataset_path, device = device, use_cuda = False)
-
-        if args.predict and args.load_model_path:
-            trainer.predict(out_file = '', import_path_base = args.load_model_path)
-        else:
+        '''训练模式'''
+        if not args.predict:
+            '''检查必须的参数, 若缺失任意一个参数, 则抛出异常'''
+            assert args.last_model_path and args.best_model_path and args.validate
+            trainer = SPNueralBase(args.dataset_path, args.validate, use_cuda = args.gpu_mode)
             trainer.train(args.last_model_path, args.best_model_path)
+        else:
+            '''预测模式'''
+            trainer = SPNueralBase(args.dataset_path, use_cuda = args.gpu_mode)
+            '''检查必须的参数, 若缺失任意一个参数, 则抛出异常'''
+            assert args.load_model_path
+            trainer.predict(import_path_base = args.load_model_path)
     except:
         print(traceback.format_exc())

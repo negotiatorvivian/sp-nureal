@@ -60,13 +60,12 @@ def _module(model):
     return model.module if isinstance(model, nn.DataParallel) else model
 
 
-def run_cora(data_loader, rep, epoch, model_list, loss_evaluator, device, batch_replication, hidden_dimension,
-             feature_dim, train_outer_recurrence_num, use_cuda = True, is_train = True, randomized = True):
+def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_replication, hidden_dimension,
+                feature_dim, train_outer_recurrence_num, use_cuda = True, is_train = True, randomized = True):
     np.random.seed(1)
     random.seed(1)
     '''优化参数列表'''
     optim_list = [{'params': filter(lambda p: p.requires_grad, model.parameters())} for model in model_list]
-    total_loss = np.zeros(len(model_list), dtype = np.float32)
     total_example_num = 0
     '''# 下标起始位置为1,每次读入为 dalaloader 里的一项'''
     for (j, data) in enumerate(data_loader, 1):
@@ -109,14 +108,18 @@ def run_cora(data_loader, rep, epoch, model_list, loss_evaluator, device, batch_
                 enc1.num_samples = 15
                 enc2.num_samples = 5
                 graphsage = SupervisedGraphSage(hidden_dimension, feature_dim, enc2, 'sp-nueral')
+
                 '''优化参数列表增加graphSAGE模型参数'''
                 optim_list.append({'params': filter(lambda p: p.requires_grad, graphsage.parameters())})
                 optimizer = torch.optim.SGD(optim_list, lr = 0.3, weight_decay = 0.01)
                 optimizer.zero_grad()
-                nodes = [i for i in range(sat_problem._variable_num)]
                 # edges = np.concatenate((-1 * sat_problem._meta_data[0], sat_problem._meta_data[0]))
+                nodes = [i for i in range(sat_problem._variable_num)]
                 for i in range(train_outer_recurrence_num):
                     loss += graphsage.loss(nodes, Variable(torch.FloatTensor(answers)), sat_problem)
+            else:
+                optimizer = torch.optim.SGD(optim_list, lr = 0.3, weight_decay = 0.01)
+                optimizer.zero_grad()
             for (k, model) in enumerate(model_list):
                 '''初始化变量state, 可选择随机是否随机初始化 其中 batch_replication 表示同一个CNF数据重复次数'''
                 state = _module(model).get_init_state(graph_map, randomized, batch_replication)
@@ -124,28 +127,29 @@ def run_cora(data_loader, rep, epoch, model_list, loss_evaluator, device, batch_
                 for i in torch.arange(train_outer_recurrence_num, dtype = torch.int32, device = device):
                     variable_prediction, state = model(init_state = state, sat_problem = sat_problem,
                                                        is_training = True)
-                    if is_train:
-                        '''计算 sp_aggregator 的loss'''
-                        loss += loss_evaluator(variable_prediction = variable_prediction, label = label,
-                                               graph_map = sat_problem._graph_map,
-                                               batch_variable_map = sat_problem._batch_variable_map,
-                                               batch_function_map = sat_problem._batch_function_map,
-                                               edge_feature = sat_problem._edge_feature, meta_data = None,
-                                               global_step = model._global_step)
-                        '''根据训练结果计算CNF预测值 确定某些变量的值'''
-                        res = sat_problem._post_process_predictions(variable_prediction)
-                        if res is None:
-                            break
-                        if len(answers) > 0:
-                            '''取出子句不满足的所有边的集合'''
-                            edges = answers.repeat(batch_replication)[res]
-                            loss += graphsage.loss(res, Variable(torch.FloatTensor(edges)), sat_problem)
+                    '''计算 sp_aggregator 的loss'''
+                    loss += model.compute_loss(is_train, variable_prediction, label, sat_problem._graph_map,
+                                               sat_problem._batch_variable_map, sat_problem._batch_function_map,
+                                               sat_problem._edge_feature, sat_problem._meta_data)
+                    '''根据训练结果计算CNF预测值 确定某些变量的值'''
+                    res = sat_problem._post_process_predictions(variable_prediction)
+                    if res is None:
+                        break
+                    if len(answers) > 0:
+                        '''取出子句不满足的所有边的集合'''
+                        edges = answers.repeat(batch_replication)[res]
+                        loss += graphsage.loss(res, Variable(torch.FloatTensor(edges)), sat_problem)
+
+                    for p in variable_prediction:
+                        del p
+
+                for s in state:
+                    del s
 
                 print('rep: %d, epoch: %d, data segment: %d, loss: %f' % (rep, epoch, seg, loss))
                 total_loss[k] += loss.detach().cpu().numpy()
                 loss.backward()
-                for s in state:
-                    del s
+
             optimizer.step()
 
         for model in model_list:
@@ -157,4 +161,85 @@ def run_cora(data_loader, rep, epoch, model_list, loss_evaluator, device, batch_
             del graph_feat
             del label
             del edge_feature
-    return total_loss / total_example_num
+    return total_loss / total_example_num.cpu().numpy()
+
+
+def test_batch(data_loader, errors, model_list, device, batch_replication, use_cuda = True, is_train = False,
+               randomized = True):
+    np.random.seed(1)
+    random.seed(1)
+    total_example_num = 0
+    '''# 下标起始位置为1,每次读入为 dalaloader 里的一项'''
+    for (j, data) in enumerate(data_loader, 1):
+        segment_num = len(data[0])
+        for seg in range(segment_num):
+            '''将读进来的data放进gpu'''
+            (graph_map, batch_variable_map, batch_function_map,
+             edge_feature, graph_feat, label, answers, var, func) = [_to_cuda(d[seg], use_cuda, device) for d in data]
+            total_example_num += (batch_variable_map.max() + 1)
+            sat_problem = SATProblem((graph_map, batch_variable_map, batch_function_map, edge_feature, answers, None),
+                                     device, batch_replication)
+            for (k, model) in enumerate(model_list):
+                '''初始化变量state, 可选择随机是否随机初始化 其中 batch_replication 表示同一个CNF数据重复次数'''
+                state = _module(model).get_init_state(graph_map, randomized, batch_replication)
+                variable_prediction, state = model(init_state = state, sat_problem = sat_problem,
+                                                   is_training = True)
+                '''计算 sp_aggregator 的 error'''
+                errors[:, k] += model.compute_loss(is_train, variable_prediction, label, sat_problem._graph_map,
+                                                   sat_problem._batch_variable_map, sat_problem._batch_function_map,
+                                                   sat_problem._edge_feature, sat_problem._meta_data,
+                                                   sat_problem._vf_mask_tuple[3])
+
+                for p in variable_prediction:
+                    del p
+
+                for s in state:
+                    del s
+
+                print('{:s}: segment: {:d}, error={:s}|'.
+                      format(_module(model)._name, seg, np.array_str(errors[:, k].flatten())))
+
+            del graph_map
+            del batch_variable_map
+            del batch_function_map
+            del graph_feat
+            del label
+            del edge_feature
+    return errors / total_example_num.cpu().numpy()
+
+
+def predict_batch(data_loader, model_list, device, batch_replication, use_cuda = True, randomized = True):
+    np.random.seed(1)
+    random.seed(1)
+    total_example_num = 0
+    '''下标起始位置为1,每次读入为 dalaloader 里的一项'''
+    for (j, data) in enumerate(data_loader, 1):
+        segment_num = len(data[0])
+        for seg in range(segment_num):
+            '''将读进来的data放进gpu'''
+            (graph_map, batch_variable_map, batch_function_map,
+             edge_feature, graph_feat, label, answers, var, func) = [_to_cuda(d[seg], use_cuda, device) for d in data]
+            total_example_num += (batch_variable_map.max() + 1)
+            sat_problem = SATProblem((graph_map, batch_variable_map, batch_function_map, edge_feature, answers, None),
+                                     device, batch_replication)
+            for (k, model) in enumerate(model_list):
+                '''初始化变量state, 可选择随机是否随机初始化 其中 batch_replication 表示同一个CNF数据重复次数'''
+                state = _module(model).get_init_state(graph_map, randomized, batch_replication)
+                '''train_outer_recurrence_num 代表同一组数据重新训练的次数, loss叠加'''
+                variable_prediction, state = model(init_state = state, sat_problem = sat_problem,
+                                                   is_training = True)
+
+                sat_problem._post_process_predictions(variable_prediction)
+
+                for p in variable_prediction:
+                    del p
+
+                for s in state:
+                    del s
+
+            del graph_map
+            del batch_variable_map
+            del batch_function_map
+            del graph_feat
+            del label
+            del edge_feature
