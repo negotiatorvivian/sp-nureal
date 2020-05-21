@@ -1,6 +1,8 @@
 import linecache, json
 import collections
 import numpy as np
+import subprocess
+import os
 
 import torch
 import torch.utils.data as data
@@ -10,9 +12,10 @@ import torch.nn.functional as F
 
 class DynamicBatchDivider(object):
 
-    def __init__(self, limit, hidden_dim):
+    def __init__(self, limit, hidden_dim, parallel = False):
         self.limit = limit
         self.hidden_dim = hidden_dim
+        self.parallel = parallel
 
     def divide(self, variable_num, function_num, graph_map, edge_feature, graph_feature, label, misc_data):
         batch_size = len(variable_num)
@@ -47,9 +50,11 @@ class DynamicBatchDivider(object):
             i = 0
 
             while i < batch_size:
-                allowed_batch_size = self.limit // (sorted_edge_num[i] * self.hidden_dim)
-                if allowed_batch_size == 0:
-                    allowed_batch_size = 1   # 设置一次读的数据
+                '''是否并行处理'''
+                if self.parallel:
+                    allowed_batch_size = max(self.limit // (sorted_edge_num[i] * self.hidden_dim), 1)
+                else:
+                    allowed_batch_size = 1
                 ind = indices[i:min(i + allowed_batch_size, batch_size)]
 
                 if graph_feature[0] is None:
@@ -75,17 +80,19 @@ class DynamicBatchDivider(object):
 class FactorGraphDataset(data.Dataset):
     """将 CNF 文件转换为json格式 返回的是一个迭代器 data_loader"""
 
-    def __init__(self, input_file, limit, hidden_dim, max_cache_size=100000, epoch_size=0, batch_replication=3):
+    def __init__(self, input_file, limit, hidden_dim, max_cache_size=100000, epoch_size=0, batch_replication=3,
+                 parallel = False):
 
         self._cache = collections.OrderedDict()
         self._epoch_size = epoch_size
         self._input_file = input_file
         self._max_cache_size = max_cache_size
+        self._parallel = parallel
 
         with open(self._input_file, 'r') as fh_input:
             self._row_num = len(fh_input.readlines())
 
-        self.batch_divider = DynamicBatchDivider(limit // batch_replication, hidden_dim)
+        self.batch_divider = DynamicBatchDivider(limit // batch_replication, hidden_dim, self._parallel)
 
     def __len__(self):
         return self._row_num
@@ -175,7 +182,7 @@ class FactorGraphDataset(data.Dataset):
 
     @staticmethod
     def get_loader(input_file, limit, hidden_dim, batch_size, shuffle, num_workers,
-                    max_cache_size=100000, use_cuda=True, epoch_size=0, batch_replication=1):
+                    max_cache_size=100000, use_cuda=True, epoch_size=0, batch_replication=1, parallel = False):
 
         dataset = FactorGraphDataset(
             input_file=input_file,
@@ -183,7 +190,8 @@ class FactorGraphDataset(data.Dataset):
             hidden_dim=hidden_dim,
             max_cache_size=max_cache_size,
             epoch_size=epoch_size,
-            batch_replication=batch_replication)
+            batch_replication=batch_replication,
+            parallel = parallel)
         data_loader = torch.utils.data.DataLoader(
             dataset=dataset,
             batch_size=batch_size,
@@ -291,4 +299,16 @@ def sparse_argmax(x, mask, device):
         dense_mat = torch.sparse.FloatTensor(mask._indices(), x - x.min() + 1, mask.size(), device = device).to_dense()
 
     return torch.argmax(dense_mat, 0)
+
+
+def use_solver(sat_str):
+    """使用确定性求解器求解"""
+    root_path = os.getcwd()
+    with open(root_path + '/datasets/temp.cnf', 'w+') as f:
+        f.write(sat_str)
+    f = open(root_path + '/datasets/temp.cnf', 'r')
+    process = subprocess.run(root_path + '/glucose_release', stdin = f, stdout = subprocess.PIPE, encoding = 'utf-8')
+    if process.stdout.find('s SATISFIABLE') >= 0:
+        return True
+    return False
 

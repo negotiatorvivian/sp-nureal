@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import random
+import util
 
 
 class IdentityPredictor(nn.Module):
@@ -43,15 +45,13 @@ class SatCNFEvaluator(nn.Module):
     def __init__(self, device):
         super(SatCNFEvaluator, self).__init__()
         self._device = device
-        self._variable = None
         self._unsat = None
         self._sat = None
-        self._unsat_limit = 5
-        self._count = 0
+        self._global_step = nn.Parameter(torch.tensor([0], dtype = torch.float, device=self._device), requires_grad=False)
 
     def forward(self, variable_prediction, graph_map, batch_variable_map,
                 batch_function_map, edge_feature, vf_mask = None, graph_mask = None, active_variables = None,
-                active_functions = None):
+                active_functions = None, sat_problem = None):
         # self._variable = torch.sign(variable_prediction)
         function_num = batch_function_map.size(0)
         all_ones = torch.ones(function_num, 1, device = self._device)
@@ -70,25 +70,18 @@ class SatCNFEvaluator(nn.Module):
 
         clause_values = torch.mm(function_mask, edge_values)
         clause_values = (clause_values > 0).float()
+        res = False
         if vf_mask is not None:
             '''所有出现在不满足的子句中的变量并去重'''
             unsat_vars = vf_mask.to_dense()[np.argwhere(clause_values.squeeze(1) == 0)[0]]
             unsat_vars = set(np.argwhere(unsat_vars > 0)[1].numpy())
-            '''计算上一次结果与这一次结果中不满足的变量的差异, 若小于_unsat_limit 且连续3次均如此 -> 本轮训练不需要再继续进行了'''
-            if self._unsat is not None and len(self._unsat - unsat_vars) < self._unsat_limit:
-                self._count += 1
-                # if self._count >= 3:
-                #     return None, None
             self._unsat = unsat_vars
             '''所有出现在满足中的子句中的变量并去重'''
             sat_vars = vf_mask.to_dense()[np.argwhere(clause_values.squeeze(1) == 1)[0]]
             sat_vars = set(np.argwhere(sat_vars > 0)[1].numpy())
             '''相减后获得差集: 即可以确定值的变量 -> 变量所在的子句均为可满足子句'''
             self._sat = sat_vars - self._unsat
-            functions = set(np.argwhere(vf_mask.to_dense()[:, list(self._sat)])[0].numpy()) - set(
-                np.argwhere(vf_mask.to_dense()[:, list(unsat_vars)] > 0)[0].numpy())
-            functions = list(functions) if functions is not None else []
-            variables = list(set(np.argwhere(vf_mask.to_dense()[functions, :] > 0)[1].numpy()))
+            res, variables = self.simplify(sat_problem, variable_prediction)
 
         '''最大可满足子句数'''
         max_sat = torch.mm(b_function_mask_transpose, all_ones)
@@ -96,10 +89,38 @@ class SatCNFEvaluator(nn.Module):
         batch_values = torch.mm(b_function_mask_transpose, clause_values)
 
         if vf_mask is not None:
-            return ((max_sat == batch_values).float(), max_sat - batch_values, graph_map, clause_values), \
-                   (list(self._unsat), functions, variables)
+            return res, (max_sat - batch_values, graph_map, clause_values), (list(self._unsat), variables)
         else:
-            return ((max_sat == batch_values).float(), max_sat - batch_values, graph_map, clause_values), None
+            return res, ((max_sat == batch_values).float(), max_sat - batch_values, graph_map, clause_values), None
+
+    def simplify(self, sat_problem, variable_prediction):
+        variables = list(self._sat)
+        # indices = random.sample(range(len(variables)), max(int(len(variables)/15), 1))
+        indices = random.sample(range(len(variables)), max(2, 1))
+        functions = np.array(sat_problem.node_adj_lists)[variables]
+        symbols = ((variable_prediction[variables] > 0.5).to(torch.float) * 2 - 1).to(torch.long)
+        deactivate_functions = []
+        deactivate_varaibles = []
+        for j in range(len(indices)):
+            i = indices[j]
+            pos_functions = np.array(functions[i][np.argwhere(torch.tensor(functions[i]) * symbols[i] > 0)]).flatten()
+            if len(pos_functions) < len(functions[i]):
+                deactivate_varaibles.append(variables[i])
+            deactivate_functions.extend(np.abs(pos_functions) - 1)
+        deactivate_functions = list(set(deactivate_functions)) if len(deactivate_functions) > 0 else []
+        sat_str = 'p cnf ' + str(sat_problem._variable_num) + ' ' + str(sat_problem._function_num -
+                                                                        len(deactivate_functions)) + '\n'
+        for j in range(sat_problem._function_num):
+            if j not in deactivate_functions:
+                functions = ((sat_problem._graph_map[0] + 1) * sat_problem._edge_feature.squeeze().to(torch.int))[
+                    sat_problem._graph_map[1] == j]
+                function_str = [i for i in map(str, functions.numpy()) if abs(int(i) - 1) not in deactivate_varaibles]
+                if len(function_str) == 0:
+                    return False, None
+                sat_str += ' '.join(function_str)
+                sat_str += ' 0\n'
+        res = util.use_solver(sat_str)
+        return res, (np.array(variables)[indices], (symbols[indices].squeeze() > 0).numpy())
 
 
 class SatLossEvaluator(nn.Module):
@@ -174,7 +195,6 @@ class SatLossEvaluator(nn.Module):
 
         variable_mask_transpose = variable_mask.transpose(0, 1)
         function_mask_transpose = function_mask.transpose(0, 1)
-
         return (variable_mask, variable_mask_transpose, function_mask, function_mask_transpose)
 
     def forward(self, variable_prediction, label, graph_map, batch_variable_map, batch_function_map, edge_feature,

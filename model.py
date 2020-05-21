@@ -17,7 +17,8 @@ class SupervisedGraphSage(nn.Module):
     def __init__(self, feature_dim, hidden_dim, enc, name):
         super(SupervisedGraphSage, self).__init__()
         self.enc = enc  # sp_encoder
-        self.lent = nn.L1Loss()
+        # self.lent = nn.L1Loss()
+        self.lent = nn.CrossEntropyLoss()
         self._prediction_layer = Perceptron(feature_dim, hidden_dim, 1)
         self._name = name
         self.weight = nn.Parameter(torch.FloatTensor(feature_dim, enc.embed_dim))
@@ -25,22 +26,34 @@ class SupervisedGraphSage(nn.Module):
 
     def forward(self, nodes, sat_problem):
         embeds = self.enc(nodes)
-        # scores = self.activation(self.weight.mm(embeds).t())
-        ''' 线性层计算 score'''
-        scores = self._prediction_layer(self.weight.mm(embeds).t())
-        mask = torch.ones((sat_problem._variable_num, 1), dtype = torch.float)
-        mask[nodes] = 1 - scores
-        mask = 1 - mask
-        # length = int(len(nodes)/2)
-        '''更新 sat_problem 的解'''
-        variable_prediction = update_solution(mask, sat_problem)
+        scores = self.weight.mm(embeds).t()
+        variables = scores.data.numpy().argmax(axis = 1)
+        # ''' 线性层计算 score'''
+        # scores = self._prediction_layer(self.weight.mm(embeds).t())
+        if len(variables) != sat_problem._variable_num:
+            solution = sat_problem._solution.detach()
+            solution[nodes] = torch.tensor(variables, dtype = torch.float)
+            # mask = torch.ones((sat_problem._variable_num, 1), dtype = torch.float)
+            # mask[nodes] = 1 - variables
+            mask = solution.unsqueeze(1)
+        else:
+            mask = torch.tensor(variables, dtype = torch.float).unsqueeze(1)
+            # mask = sat_problem._solution.detach()
+
         '''计算 sat_problem 的可满足子句数'''
-        sat_problem._post_process_predictions(variable_prediction)
+        _, output, certain_vars = sat_problem._post_process_predictions(mask)
+        if output:
+            sat_problem._active_variables[certain_vars[0]] = 0
+            sat_problem._solution[torch.tensor(certain_vars[0])] = torch.tensor(certain_vars[1], dtype = torch.float)
+            # mask.numpy()[certain_vars[0]][:, 0] = certain_vars[1]
+            '''更新 sat_problem 的解'''
+            update_solution(mask, sat_problem)
         return scores
 
     def loss(self, nodes, labels, sat_problem):
         scores = self.forward(nodes, sat_problem)
-        return self.lent(scores.squeeze(1), labels)
+        # return self.lent(scores.squeeze(1), labels)
+        return self.lent(scores, ((labels+1)/2).to(torch.long))
 
 
 def load_cora(dimacs_file):
@@ -113,8 +126,8 @@ def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_r
                 optim_list.append({'params': filter(lambda p: p.requires_grad, graphsage.parameters())})
                 optimizer = torch.optim.SGD(optim_list, lr = 0.3, weight_decay = 0.01)
                 optimizer.zero_grad()
-                # edges = np.concatenate((-1 * sat_problem._meta_data[0], sat_problem._meta_data[0]))
                 nodes = [i for i in range(sat_problem._variable_num)]
+                # sample_length = int(len(nodes)/train_outer_recurrence_num)
                 for i in range(train_outer_recurrence_num):
                     loss += graphsage.loss(nodes, Variable(torch.FloatTensor(answers)), sat_problem)
             else:
@@ -132,7 +145,7 @@ def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_r
                                                sat_problem._batch_variable_map, sat_problem._batch_function_map,
                                                sat_problem._edge_feature, sat_problem._meta_data)
                     '''根据训练结果计算CNF预测值 确定某些变量的值'''
-                    res = sat_problem._post_process_predictions(variable_prediction)
+                    res, output, _ = sat_problem._post_process_predictions(variable_prediction)
                     if res is None:
                         break
                     if len(answers) > 0:
@@ -188,7 +201,7 @@ def test_batch(data_loader, errors, model_list, device, batch_replication, use_c
                 errors[:, k] += model.compute_loss(is_train, variable_prediction, label, sat_problem._graph_map,
                                                    sat_problem._batch_variable_map, sat_problem._batch_function_map,
                                                    sat_problem._edge_feature, sat_problem._meta_data,
-                                                   sat_problem._vf_mask_tuple[3])
+                                                   sat_problem._vf_mask_tuple[3], sat_problem)
 
                 for p in variable_prediction:
                     del p

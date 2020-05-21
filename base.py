@@ -7,7 +7,6 @@ import argparse
 import traceback
 import numpy as np
 from collections import defaultdict
-from itertools import combinations
 
 import model as SPModel
 from aggregators import SurveyAggregator, SurveyNeuralPredictor
@@ -313,12 +312,14 @@ class SATProblem(object):
     def _compute_adj_list(self):
         """计算与变量 n 同时出现在某一个子句中的变量集合"""
         adj_lists = defaultdict(set)
-        node_adj_lists = []
+        node_list = []
         self.nodes = ((self._signed_mask_tuple[0]._indices()[0].to(torch.float) + 1) * self._edge_feature.squeeze(1)) \
             .to(torch.long)
         for j in range(self._variable_num):
             # for j in [i, -i]:
             indices = self._graph_map[1][np.argwhere(torch.abs(self.nodes) == j + 1)][0].to(torch.long)
+            functions = np.array(self._vf_mask_tuple[3].to(torch.long).to_dense()[indices, :][:, j] * (indices + 1))
+            node_list.append(functions + 1)
             edge_indices = np.argwhere(self._signed_mask_tuple[2].to_dense()[indices] != 0)[1]
             relations = set([abs(i) - 1 for i in self.nodes[edge_indices].numpy()])
             # index = j + self._variable_num if j < 0 else j + self._variable_num - 1
@@ -326,24 +327,23 @@ class SATProblem(object):
             if len(relations) < 2:
                 continue
             adj_lists[j] = relations - set([j])
-        return adj_lists, node_adj_lists
+        return adj_lists, node_list
 
     def _post_process_predictions(self, prediction, is_training = True):
         """计算 cnf 中可满足的子句数"""
-        res, activations = self._cnf_evaluator(prediction, self._graph_map, self._batch_variable_map,
-                                               self._batch_function_map, self._edge_feature,
-                                               self._vf_mask_tuple[1], self._graph_mask_tuple[3],
-                                               self._active_variables, self._active_functions)
-        trained_vars, functions, variables = activations
+        output, res, activations = self._cnf_evaluator(prediction, self._graph_map, self._batch_variable_map,
+                                                       self._batch_function_map, self._edge_feature,
+                                                       self._vf_mask_tuple[1], self._graph_mask_tuple[3],
+                                                       self._active_variables, self._active_functions, self)
+
         if res is None:
             return None
-        output, unsat_clause_num, graph_map, clause_values = [a.detach().cpu().numpy() for a in res]
-        if not is_training:
-            self._active_functions[functions] = 0
-            self._active_variables[variables] = 0
-            print('unsat_clause_num:', unsat_clause_num)
-        '''若res不为空, trained_vars表示所有不满足子句中出现过的变量'''
-        return trained_vars
+        # unsat_clause_num, graph_map, clause_values = [a.detach().cpu().numpy() for a in res]
+        if activations is not None:
+            trained_vars, certain_vars = activations
+            print('sat:', output, '\ncertain_vars:', certain_vars)
+            '''若res不为空, trained_vars表示所有不满足子句中出现过的变量'''
+            return trained_vars, output, certain_vars
 
 
 class PropagatorDecimatorSolverBase(nn.Module):
@@ -552,13 +552,13 @@ class PropagatorDecimatorSolverBase(nn.Module):
         else:
             active[active[:, 0], 0] = (output[active[:, 0], 0] <= 0.5)
 
-    def _compute_evaluation_metrics(self, evaluator, prediction, label, graph_map,
-                                    batch_variable_map, batch_function_map, edge_feature, meta_data, vf_mask):
+    def _compute_evaluation_metrics(self, evaluator, prediction, label, graph_map, batch_variable_map,
+                                    batch_function_map, edge_feature, meta_data, vf_mask, sat_problem = None):
         """交叉验证"""
         output, _ = self._cnf_evaluator(variable_prediction = prediction, graph_map = graph_map,
                                         batch_variable_map = batch_variable_map,
                                         batch_function_map = batch_function_map,
-                                        edge_feature = edge_feature, vf_mask = vf_mask)
+                                        edge_feature = edge_feature, vf_mask = vf_mask, sat_problem = sat_problem)
 
         recall = torch.sum(label * ((output[0] > 0.5).float() - label).abs()) / torch.max(torch.sum(label), self._eps)
         accuracy = evaluator((output[0] > 0.5).float(), label).unsqueeze(0)
@@ -570,19 +570,20 @@ class PropagatorDecimatorSolverBase(nn.Module):
         return torch.cat([accuracy, recall, loss_value], 0)
 
     def compute_loss(self, mode, prediction, label, graph_map, batch_variable_map, batch_function_map,
-                     edge_feature, meta_data = None, vf_mask = None):
+                     edge_feature, meta_data = None, vf_mask = None, sat_problem = None):
         if mode:
             '''训练集'''
             res = self._loss_evaluator(variable_prediction = prediction, label = label, graph_map = graph_map,
                                        batch_variable_map = batch_variable_map, batch_function_map = batch_function_map,
                                        edge_feature = edge_feature, meta_data = meta_data, global_step =
                                        self._global_step, eps = self._eps)
+
             return res
         else:
             '''验证集'''
             evaluator = nn.L1Loss()
             res = self._compute_evaluation_metrics(evaluator, prediction, label, graph_map, batch_variable_map,
-                                                   batch_function_map, edge_feature, meta_data, vf_mask)
+                                                   batch_function_map, edge_feature, meta_data, vf_mask, sat_problem)
             return res.cpu().numpy()
 
     def get_init_state(self, graph_map, randomized, batch_replication = 1):
@@ -603,7 +604,7 @@ class PropagatorDecimatorSolverBase(nn.Module):
 
 class SPNueralBase:
     def __init__(self, dimacs_file, validate_file = None, epoch_replication = 3, batch_replication = 1, epoch = 100,
-                 batch_size = 2000, hidden_dimension = 160, feature_dim = 100, train_outer_recurrence_num = 5,
+                 batch_size = 2000, hidden_dimension = 1, feature_dim = 100, train_outer_recurrence_num = 5,
                  alpha = 0.1, error_dim = 3, use_cuda = True):
         self._use_cuda = use_cuda and torch.cuda.is_available()
         '''读入数据路径'''
@@ -618,7 +619,7 @@ class SPNueralBase:
         self._gru_hidden_dimension = hidden_dimension
         self._feature_dim = feature_dim
         '''以下 limit 设置是用于控制 data_loader 一次读入多少行数据'''
-        self._train_batch_limit = 400000
+        self._train_batch_limit = 20000
         self._test_batch_limit = 40000
         self._max_cache_size = 100000
         self._train_outer_recurrence_num = train_outer_recurrence_num
@@ -662,13 +663,13 @@ class SPNueralBase:
             return errors
 
     def train(self, last_export_path_base = None, best_export_path_base = None, metric_index = 0, load_model = None,
-              train_epoch_size = 0, reset_step = False, is_train = True):
+              train_epoch_size = 0, reset_step = False, is_train = True, parallel = False):
         """训练集"""
         train_loader = util.FactorGraphDataset.get_loader(
             input_file = self._dimacs_file, limit = self._train_batch_limit,
             hidden_dim = self._hidden_dimension, batch_size = self._batch_size, shuffle = True,
             num_workers = self._num_cores, max_cache_size = self._max_cache_size,
-            epoch_size = train_epoch_size)
+            epoch_size = train_epoch_size, parallel = parallel)
         '''验证集'''
         validation_loader = util.FactorGraphDataset.get_loader(
             input_file = self._validate_file, limit = self._train_batch_limit,

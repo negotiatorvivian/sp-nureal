@@ -3,3 +3,5 @@ logs
 Models
 .idea
 __pycache__
+glucose_release
+temperature.py
