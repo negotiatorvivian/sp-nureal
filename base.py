@@ -316,14 +316,11 @@ class SATProblem(object):
         self.nodes = ((self._signed_mask_tuple[0]._indices()[0].to(torch.float) + 1) * self._edge_feature.squeeze(1)) \
             .to(torch.long)
         for j in range(self._variable_num):
-            # for j in [i, -i]:
             indices = self._graph_map[1][np.argwhere(torch.abs(self.nodes) == j + 1)][0].to(torch.long)
             functions = np.array(self._vf_mask_tuple[3].to(torch.long).to_dense()[indices, :][:, j] * (indices + 1))
             node_list.append(functions + 1)
             edge_indices = np.argwhere(self._signed_mask_tuple[2].to_dense()[indices] != 0)[1]
             relations = set([abs(i) - 1 for i in self.nodes[edge_indices].numpy()])
-            # index = j + self._variable_num if j < 0 else j + self._variable_num - 1
-            # node_adj_lists.extend(list(relations - set([index])))
             if len(relations) < 2:
                 continue
             adj_lists[j] = relations - set([j])
@@ -334,7 +331,7 @@ class SATProblem(object):
         output, res, activations = self._cnf_evaluator(prediction, self._graph_map, self._batch_variable_map,
                                                        self._batch_function_map, self._edge_feature,
                                                        self._vf_mask_tuple[1], self._graph_mask_tuple[3],
-                                                       self._active_variables, self._active_functions, self)
+                                                       self._active_variables, self._active_functions, self, is_training)
 
         if res is None:
             return None
@@ -376,8 +373,7 @@ class PropagatorDecimatorSolverBase(nn.Module):
         self._module_list.append(self._propagator)
         self._module_list.append(self._predictor)
 
-        self._global_step = nn.Parameter(torch.tensor([0], dtype = torch.float, device = self._device),
-                                         requires_grad = False)
+        self._global_step = nn.Parameter(torch.tensor([0], dtype = torch.float, device = self._device), requires_grad = False)
         self._name = name
         self._local_search_iterations = local_search_iterations
         self._eps = 1e-8 * torch.ones(1, device = self._device, requires_grad = False)

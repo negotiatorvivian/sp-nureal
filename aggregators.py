@@ -281,7 +281,7 @@ class SurveyAggregator(nn.Module):
             edge_num = init_state[0].size(0)
             mask = torch.ones(edge_num, 1, device = self._device)
 
-        if sat_problem._meta_data is not None:
+        if len(sat_problem._meta_data[0]) > 0:
             graph_feat = torch.sparse.FloatTensor(b_variable_mask._indices(), torch.tensor(np.concatenate(
                 np.array(sat_problem._meta_data)), dtype = torch.float)).to_dense()
             graph_feat = torch.sum(torch.mm(variable_mask_transpose, graph_feat), 1).unsqueeze(1)
@@ -291,16 +291,22 @@ class SurveyAggregator(nn.Module):
         '''变量向量表示'''
         variable_state = torch.cat((variable_state, sat_problem._edge_feature), 1)
 
-        if sat_problem._meta_data is not None:
+        if len(sat_problem._meta_data[0]) > 0:
             variable_state = torch.cat((variable_state, graph_feat), 1)
+        else:
+            variable_mask = torch.mm(sat_problem._signed_mask_tuple[1].to_dense(), sat_problem._solution.unsqueeze(1))
+            variable_state = torch.cat((variable_state, variable_mask), 1)
 
         variable_state = mask * self._variable_rnn_cell(variable_state, init_state[0]) + (1 - mask) * init_state[0]
 
         '''子句向量表示'''
         function_state = torch.cat((function_state, sat_problem._edge_feature), 1)
 
-        if sat_problem._meta_data is not None:
+        if len(sat_problem._meta_data[0]) > 0:
             function_state = torch.cat((function_state, graph_feat), 1)
+        else:
+            function_mask = torch.mm(sat_problem._signed_mask_tuple[3].to_dense(), sat_problem._active_functions)
+            function_state = torch.cat((function_state, function_mask), 1)
 
         function_state = mask * self._function_rnn_cell(function_state, init_state[1]) + (1 - mask) * init_state[1]
 
@@ -390,7 +396,7 @@ class SurveyNeuralPredictor(nn.Module):
 
         variable_prediction = None
 
-        if sat_problem._meta_data is not None:
+        if len(sat_problem._meta_data[0]) > 0:
             graph_feat = torch.sparse.FloatTensor(b_variable_mask._indices(), torch.tensor(np.concatenate(
                 np.array(sat_problem._meta_data)), dtype = torch.float)).to_dense()
             graph_feat = torch.sum(torch.mm(variable_mask_transpose, graph_feat), 1).unsqueeze(1)
@@ -405,8 +411,12 @@ class SurveyNeuralPredictor(nn.Module):
             '''将变量与边向量拼接'''
             aggregated_variable_state = torch.cat((variable_state, sat_problem._edge_feature), 1)
 
-            if sat_problem._meta_data is not None:
+            if len(sat_problem._meta_data[0]) > 0:
                 aggregated_variable_state = torch.cat((aggregated_variable_state, graph_feat), 1)
+            else:
+                aggregated_variable_mask = torch.mm(sat_problem._signed_mask_tuple[1].to_dense(),
+                                                    sat_problem._solution.unsqueeze(1))
+                aggregated_variable_state = torch.cat((aggregated_variable_state, aggregated_variable_mask), 1)
             '''应用置换不变的聚合器'''
             aggregated_variable_state = self._variable_aggregator(
                 aggregated_variable_state, variable_mask, variable_mask_transpose, edge_mask)

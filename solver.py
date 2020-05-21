@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import random
+import math
 import util
 
 
@@ -47,11 +48,12 @@ class SatCNFEvaluator(nn.Module):
         self._device = device
         self._unsat = None
         self._sat = None
-        self._global_step = nn.Parameter(torch.tensor([0], dtype = torch.float, device=self._device), requires_grad=False)
+        self._temperature = 1
+        self._increment = 0.5
 
     def forward(self, variable_prediction, graph_map, batch_variable_map,
                 batch_function_map, edge_feature, vf_mask = None, graph_mask = None, active_variables = None,
-                active_functions = None, sat_problem = None):
+                active_functions = None, sat_problem = None, is_training = True):
         # self._variable = torch.sign(variable_prediction)
         function_num = batch_function_map.size(0)
         all_ones = torch.ones(function_num, 1, device = self._device)
@@ -81,7 +83,7 @@ class SatCNFEvaluator(nn.Module):
             sat_vars = set(np.argwhere(sat_vars > 0)[1].numpy())
             '''相减后获得差集: 即可以确定值的变量 -> 变量所在的子句均为可满足子句'''
             self._sat = sat_vars - self._unsat
-            res, variables = self.simplify(sat_problem, variable_prediction)
+            res, variables = self.simplify(sat_problem, variable_prediction, is_training)
 
         '''最大可满足子句数'''
         max_sat = torch.mm(b_function_mask_transpose, all_ones)
@@ -93,34 +95,42 @@ class SatCNFEvaluator(nn.Module):
         else:
             return res, ((max_sat == batch_values).float(), max_sat - batch_values, graph_map, clause_values), None
 
-    def simplify(self, sat_problem, variable_prediction):
+    def simplify(self, sat_problem, variable_prediction, is_training):
         variables = list(self._sat)
-        # indices = random.sample(range(len(variables)), max(int(len(variables)/15), 1))
-        indices = random.sample(range(len(variables)), max(2, 1))
         functions = np.array(sat_problem.node_adj_lists)[variables]
         symbols = ((variable_prediction[variables] > 0.5).to(torch.float) * 2 - 1).to(torch.long)
-        deactivate_functions = []
-        deactivate_varaibles = []
-        for j in range(len(indices)):
-            i = indices[j]
-            pos_functions = np.array(functions[i][np.argwhere(torch.tensor(functions[i]) * symbols[i] > 0)]).flatten()
-            if len(pos_functions) < len(functions[i]):
-                deactivate_varaibles.append(variables[i])
-            deactivate_functions.extend(np.abs(pos_functions) - 1)
-        deactivate_functions = list(set(deactivate_functions)) if len(deactivate_functions) > 0 else []
-        sat_str = 'p cnf ' + str(sat_problem._variable_num) + ' ' + str(sat_problem._function_num -
-                                                                        len(deactivate_functions)) + '\n'
-        for j in range(sat_problem._function_num):
-            if j not in deactivate_functions:
-                functions = ((sat_problem._graph_map[0] + 1) * sat_problem._edge_feature.squeeze().to(torch.int))[
-                    sat_problem._graph_map[1] == j]
-                function_str = [i for i in map(str, functions.numpy()) if abs(int(i) - 1) not in deactivate_varaibles]
-                if len(function_str) == 0:
-                    return False, None
-                sat_str += ' '.join(function_str)
-                sat_str += ' 0\n'
-        res = util.use_solver(sat_str)
-        return res, (np.array(variables)[indices], (symbols[indices].squeeze() > 0).numpy())
+        repeat_num = 1
+        if not is_training:
+            repeat_num = 10
+        while repeat_num > 0:
+            indices = random.sample(range(len(variables)), math.floor(math.pow(self._temperature, self._increment)))
+            deactivate_functions = []
+            deactivate_varaibles = []
+            for j in range(len(indices)):
+                i = indices[j]
+                pos_functions = np.array(functions[i][np.argwhere(torch.tensor(functions[i]) * symbols[i] > 0)]).flatten()
+                if len(pos_functions) < len(functions[i]):
+                    deactivate_varaibles.append(variables[i])
+                deactivate_functions.extend(np.abs(pos_functions) - 1)
+            deactivate_functions = list(set(deactivate_functions)) if len(deactivate_functions) > 0 else []
+            sat_str = 'p cnf ' + str(sat_problem._variable_num) + ' ' + str(sat_problem._function_num -
+                                                                            len(deactivate_functions)) + '\n'
+            for j in range(sat_problem._function_num):
+                if j not in deactivate_functions:
+                    functions = ((sat_problem._graph_map[0] + 1) * sat_problem._edge_feature.squeeze().to(torch.int))[
+                        sat_problem._graph_map[1] == j]
+                    function_str = [i for i in map(str, functions.numpy()) if abs(int(i) - 1) not in deactivate_varaibles]
+                    if len(function_str) == 0:
+                        return False, None
+                    sat_str += ' '.join(function_str)
+                    sat_str += ' 0\n'
+            res = util.use_solver(sat_str)
+            if res:
+                self._temperature += 1
+                break
+            else:
+                repeat_num -= 1
+        return res, (np.array(variables)[indices] + 1, (symbols[indices].squeeze() > 0).numpy())
 
 
 class SatLossEvaluator(nn.Module):

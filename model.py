@@ -6,7 +6,7 @@ from torch.autograd import Variable
 import numpy as np
 import random
 
-from sp_encoders import Encoder
+from encoders import Encoder
 from aggregators import MeanAggregator
 from util import CompactDimacs, Perceptron, update_solution
 from base import SATProblem
@@ -92,7 +92,7 @@ def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_r
                                      device, batch_replication)
             loss = torch.zeros(1, device = device)
             '''将所有CNF的答案拼接起来, 有解才执行 graphSage 模型'''
-            if len(answers) > 0:
+            if len(answers[0]) > 0:
                 answers = np.concatenate(answers, axis = 0)
                 '''展开所有子句的变量(绝对值)'''
                 variable_map = torch.cat(((torch.abs(sat_problem.nodes).to(torch.long) - 1).reshape(1, -1),
@@ -148,7 +148,7 @@ def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_r
                     res, output, _ = sat_problem._post_process_predictions(variable_prediction)
                     if res is None:
                         break
-                    if len(answers) > 0:
+                    if len(answers[0]) > 0:
                         '''取出子句不满足的所有边的集合'''
                         edges = answers.repeat(batch_replication)[res]
                         loss += graphsage.loss(res, Variable(torch.FloatTensor(edges)), sat_problem)
@@ -240,9 +240,9 @@ def predict_batch(data_loader, model_list, device, batch_replication, use_cuda =
                 state = _module(model).get_init_state(graph_map, randomized, batch_replication)
                 '''train_outer_recurrence_num 代表同一组数据重新训练的次数, loss叠加'''
                 variable_prediction, state = model(init_state = state, sat_problem = sat_problem,
-                                                   is_training = True)
+                                                   is_training = False)
 
-                sat_problem._post_process_predictions(variable_prediction)
+                res, output, _ = sat_problem._post_process_predictions(variable_prediction, False)
 
                 for p in variable_prediction:
                     del p
