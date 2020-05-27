@@ -43,8 +43,8 @@ class SupervisedGraphSage(nn.Module):
         '''计算 sat_problem 的可满足子句数'''
         _, output, certain_vars = sat_problem._post_process_predictions(mask)
         if output:
-            sat_problem._active_variables[certain_vars[0]] = 0
-            sat_problem._solution[torch.tensor(certain_vars[0])] = torch.tensor(certain_vars[1], dtype = torch.float)
+            sat_problem._active_variables[certain_vars[0] - 1] = 0
+            sat_problem._solution[torch.tensor(certain_vars[0] - 1)] = torch.tensor(certain_vars[1], dtype = torch.float)
             # mask.numpy()[certain_vars[0]][:, 0] = certain_vars[1]
             '''更新 sat_problem 的解'''
             update_solution(mask, sat_problem)
@@ -83,6 +83,7 @@ def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_r
     '''# 下标起始位置为1,每次读入为 dalaloader 里的一项'''
     for (j, data) in enumerate(data_loader, 1):
         segment_num = len(data[0])
+        print('CNF:', j)
         for seg in range(segment_num):
             '''将读进来的data放进gpu'''
             (graph_map, batch_variable_map, batch_function_map,
@@ -92,7 +93,7 @@ def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_r
                                      device, batch_replication)
             loss = torch.zeros(1, device = device)
             '''将所有CNF的答案拼接起来, 有解才执行 graphSage 模型'''
-            if len(answers[0]) > 0:
+            if len(answers[0].flatten()) > 0:
                 answers = np.concatenate(answers, axis = 0)
                 '''展开所有子句的变量(绝对值)'''
                 variable_map = torch.cat(((torch.abs(sat_problem.nodes).to(torch.long) - 1).reshape(1, -1),
@@ -144,14 +145,14 @@ def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_r
                     loss += model.compute_loss(is_train, variable_prediction, label, sat_problem._graph_map,
                                                sat_problem._batch_variable_map, sat_problem._batch_function_map,
                                                sat_problem._edge_feature, sat_problem._meta_data)
-                    '''根据训练结果计算CNF预测值 确定某些变量的值'''
-                    res, output, _ = sat_problem._post_process_predictions(variable_prediction)
-                    if res is None:
-                        break
-                    if len(answers[0]) > 0:
-                        '''取出子句不满足的所有边的集合'''
-                        edges = answers.repeat(batch_replication)[res]
-                        loss += graphsage.loss(res, Variable(torch.FloatTensor(edges)), sat_problem)
+                    # '''根据训练结果计算CNF预测值 确定某些变量的值'''
+                    # res, output, _ = sat_problem._post_process_predictions(variable_prediction)
+                    # if res is None:
+                    #     break
+                    # if len(answers.flatten()) > 0:
+                    #     '''取出子句不满足的所有边的集合'''
+                    #     edges = answers.repeat(batch_replication)[res]
+                    #     loss += graphsage.loss(res, Variable(torch.FloatTensor(edges)), sat_problem)
 
                     for p in variable_prediction:
                         del p
@@ -241,7 +242,7 @@ def predict_batch(data_loader, model_list, device, batch_replication, use_cuda =
                 '''train_outer_recurrence_num 代表同一组数据重新训练的次数, loss叠加'''
                 variable_prediction, state = model(init_state = state, sat_problem = sat_problem,
                                                    is_training = False)
-
+                '''根据训练结果计算CNF预测值 确定某些变量的值'''
                 res, output, _ = sat_problem._post_process_predictions(variable_prediction, False)
 
                 for p in variable_prediction:

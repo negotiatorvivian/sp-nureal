@@ -318,7 +318,7 @@ class SATProblem(object):
         for j in range(self._variable_num):
             indices = self._graph_map[1][np.argwhere(torch.abs(self.nodes) == j + 1)][0].to(torch.long)
             functions = np.array(self._vf_mask_tuple[3].to(torch.long).to_dense()[indices, :][:, j] * (indices + 1))
-            node_list.append(functions + 1)
+            node_list.append(functions)
             edge_indices = np.argwhere(self._signed_mask_tuple[2].to_dense()[indices] != 0)[1]
             relations = set([abs(i) - 1 for i in self.nodes[edge_indices].numpy()])
             if len(relations) < 2:
@@ -331,14 +331,15 @@ class SATProblem(object):
         output, res, activations = self._cnf_evaluator(prediction, self._graph_map, self._batch_variable_map,
                                                        self._batch_function_map, self._edge_feature,
                                                        self._vf_mask_tuple[1], self._graph_mask_tuple[3],
-                                                       self._active_variables, self._active_functions, self, is_training)
+                                                       self._active_variables, self._active_functions, self,
+                                                       is_training)
 
         if res is None:
             return None
         # unsat_clause_num, graph_map, clause_values = [a.detach().cpu().numpy() for a in res]
         if activations is not None:
             trained_vars, certain_vars = activations
-            print('sat:', output, '\ncertain_vars:', certain_vars)
+            print('sat:', output, '\tcertain_vars:', certain_vars)
             '''若res不为空, trained_vars表示所有不满足子句中出现过的变量'''
             return trained_vars, output, certain_vars
 
@@ -348,7 +349,7 @@ class PropagatorDecimatorSolverBase(nn.Module):
 
     def __init__(self, device, name, feature_dim, hidden_dimension,
                  agg_hidden_dimension = 100, func_hidden_dimension = 100, agg_func_dimension = 50,
-                 classifier_dimension = 50, local_search_iterations = 1000, epsilon = 0.05, alpha = 0.1,
+                 classifier_dimension = 50, local_search_iterations = 1000, temperature = 1, alpha = 0.1,
                  pure_sp = True):
 
         super(PropagatorDecimatorSolverBase, self).__init__()
@@ -367,13 +368,14 @@ class PropagatorDecimatorSolverBase(nn.Module):
         self._predictor = SurveyNeuralPredictor(device, hidden_dimension, self._predict_dimension, self._edge_dimension,
                                                 self._meta_dimension, agg_hidden_dimension, func_hidden_dimension,
                                                 agg_func_dimension, self._variable_classifier)
-        self._cnf_evaluator = solver.SatCNFEvaluator(device)
+        self._cnf_evaluator = solver.SatCNFEvaluator(device, temperature)
         self._loss_evaluator = solver.SatLossEvaluator(alpha = alpha, device = self._device)
 
         self._module_list.append(self._propagator)
         self._module_list.append(self._predictor)
 
-        self._global_step = nn.Parameter(torch.tensor([0], dtype = torch.float, device = self._device), requires_grad = False)
+        self._global_step = nn.Parameter(torch.tensor([0], dtype = torch.float, device = self._device),
+                                         requires_grad = False)
         self._name = name
         self._local_search_iterations = local_search_iterations
         self._eps = 1e-8 * torch.ones(1, device = self._device, requires_grad = False)
@@ -535,29 +537,30 @@ class PropagatorDecimatorSolverBase(nn.Module):
     def _check_recurrence_termination(self, active, prediction, sat_problem):
         """停用模型已找到SAT解决方案的CNF"""
 
-        output, _ = self._cnf_evaluator(variable_prediction = prediction[0], graph_map = sat_problem._graph_map,
+        _, res, _ = self._cnf_evaluator(variable_prediction = prediction[0],
+                                        graph_map = sat_problem._graph_map,
                                         batch_variable_map = sat_problem._batch_variable_map,
                                         batch_function_map = sat_problem._batch_function_map,
                                         edge_feature = sat_problem._edge_feature,
                                         meta_data = sat_problem._meta_data)  # .detach().cpu().numpy()
 
         if sat_problem._batch_replication > 1:
-            real_batch = torch.mm(sat_problem._replication_mask_tuple[1], (output > 0.5).float())
+            real_batch = torch.mm(sat_problem._replication_mask_tuple[1], (res[0] > 0.5).float())
             dup_batch = torch.mm(sat_problem._replication_mask_tuple[0], (real_batch == 0).float())
             active[active[:, 0], 0] = (dup_batch[active[:, 0], 0] > 0)
         else:
-            active[active[:, 0], 0] = (output[active[:, 0], 0] <= 0.5)
+            active[active[:, 0], 0] = (res[0][active[:, 0], 0] <= 0.5)
 
     def _compute_evaluation_metrics(self, evaluator, prediction, label, graph_map, batch_variable_map,
                                     batch_function_map, edge_feature, meta_data, vf_mask, sat_problem = None):
         """交叉验证"""
-        output, _ = self._cnf_evaluator(variable_prediction = prediction, graph_map = graph_map,
+        _, res, _ = self._cnf_evaluator(variable_prediction = prediction, graph_map = graph_map,
                                         batch_variable_map = batch_variable_map,
                                         batch_function_map = batch_function_map,
-                                        edge_feature = edge_feature, vf_mask = vf_mask, sat_problem = sat_problem)
-
-        recall = torch.sum(label * ((output[0] > 0.5).float() - label).abs()) / torch.max(torch.sum(label), self._eps)
-        accuracy = evaluator((output[0] > 0.5).float(), label).unsqueeze(0)
+                                        edge_feature = edge_feature, vf_mask = vf_mask,
+                                        sat_problem = sat_problem)
+        recall = torch.sum(label * ((res[0] > 0.5).float() - label).abs()) / torch.max(torch.sum(label), self._eps)
+        accuracy = evaluator((res[0] > 0.5).float(), label).unsqueeze(0)
         loss_value = self._loss_evaluator(variable_prediction = prediction, label = label, graph_map = graph_map,
                                           batch_variable_map = batch_variable_map,
                                           batch_function_map = batch_function_map,
@@ -600,7 +603,7 @@ class PropagatorDecimatorSolverBase(nn.Module):
 
 class SPNueralBase:
     def __init__(self, dimacs_file, validate_file = None, epoch_replication = 3, batch_replication = 1, epoch = 100,
-                 batch_size = 2000, hidden_dimension = 1, feature_dim = 100, train_outer_recurrence_num = 5,
+                 batch_size = 2000, hidden_dimension = 1, feature_dim = 100, train_outer_recurrence_num = 1, temperature = 1,
                  alpha = 0.1, error_dim = 3, use_cuda = True):
         self._use_cuda = use_cuda and torch.cuda.is_available()
         '''读入数据路径'''
@@ -625,7 +628,7 @@ class SPNueralBase:
         torch.set_num_threads(self._num_cores)
         '''初始化模型列表'''
         model_list = [PropagatorDecimatorSolverBase(self._device, "SP-Nueral", feature_dim, self._gru_hidden_dimension,
-                                                    alpha = alpha, pure_sp = False)]
+                                                    temperature = temperature, alpha = alpha, pure_sp = False)]
         '''将模型放到 GPU 上运行 如果 cuda 设备可用'''
         self._model_list = [self._set_device(model) for model in model_list]
 

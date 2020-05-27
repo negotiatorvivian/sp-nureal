@@ -43,18 +43,17 @@ class IdentityPredictor(nn.Module):
 class SatCNFEvaluator(nn.Module):
     """判断当前 CNF 的解是否正确"""
 
-    def __init__(self, device):
+    def __init__(self, device, temperature = 1):
         super(SatCNFEvaluator, self).__init__()
         self._device = device
         self._unsat = None
         self._sat = None
-        self._temperature = 1
+        self._temperature = temperature
         self._increment = 0.5
 
-    def forward(self, variable_prediction, graph_map, batch_variable_map,
-                batch_function_map, edge_feature, vf_mask = None, graph_mask = None, active_variables = None,
-                active_functions = None, sat_problem = None, is_training = True):
-        # self._variable = torch.sign(variable_prediction)
+    def forward(self, variable_prediction, graph_map, batch_variable_map, batch_function_map, edge_feature,
+                vf_mask = None, graph_mask = None, active_variables = None, active_functions = None, sat_problem = None,
+                is_training = True):
         function_num = batch_function_map.size(0)
         all_ones = torch.ones(function_num, 1, device = self._device)
 
@@ -65,7 +64,6 @@ class SatCNFEvaluator(nn.Module):
         b_variable_mask, b_variable_mask_transpose, b_function_mask, b_function_mask_transpose = \
             SatLossEvaluator.compute_batch_mask(batch_variable_map, batch_function_map, self._device)
 
-        # edge_values = torch.mm(signed_variable_mask_transpose, self._variable)
         edge_values = torch.mm(signed_variable_mask_transpose, variable_prediction)
         edge_values = edge_values + (1 - edge_feature) / 2
         edge_values = (edge_values > 0.5).float()
@@ -91,7 +89,7 @@ class SatCNFEvaluator(nn.Module):
         batch_values = torch.mm(b_function_mask_transpose, clause_values)
 
         if vf_mask is not None:
-            return res, (max_sat - batch_values, graph_map, clause_values), (list(self._unsat), variables)
+            return res, ((max_sat == batch_values).float(), graph_map, clause_values), (list(self._unsat), variables)
         else:
             return res, ((max_sat == batch_values).float(), max_sat - batch_values, graph_map, clause_values), None
 
@@ -99,16 +97,20 @@ class SatCNFEvaluator(nn.Module):
         variables = list(self._sat)
         functions = np.array(sat_problem.node_adj_lists)[variables]
         symbols = ((variable_prediction[variables] > 0.5).to(torch.float) * 2 - 1).to(torch.long)
-        repeat_num = 1
+        symbols_ = symbols
+        repeat_num = 2
+        indices = random.sample(range(len(variables)), math.floor(math.pow(self._temperature, self._increment)))
         if not is_training:
             repeat_num = 10
+        print('\n----------------------')
         while repeat_num > 0:
-            indices = random.sample(range(len(variables)), math.floor(math.pow(self._temperature, self._increment)))
+            if repeat_num == 1:
+                print('*** variable reversed ***')
             deactivate_functions = []
             deactivate_varaibles = []
             for j in range(len(indices)):
                 i = indices[j]
-                pos_functions = np.array(functions[i][np.argwhere(torch.tensor(functions[i]) * symbols[i] > 0)]).flatten()
+                pos_functions = np.array(functions[i][np.argwhere(torch.tensor(functions[i]) * symbols_[i] > 0)]).flatten()
                 if len(pos_functions) < len(functions[i]):
                     deactivate_varaibles.append(variables[i])
                 deactivate_functions.extend(np.abs(pos_functions) - 1)
@@ -117,19 +119,21 @@ class SatCNFEvaluator(nn.Module):
                                                                             len(deactivate_functions)) + '\n'
             for j in range(sat_problem._function_num):
                 if j not in deactivate_functions:
-                    functions = ((sat_problem._graph_map[0] + 1) * sat_problem._edge_feature.squeeze().to(torch.int))[
+                    clause = ((sat_problem._graph_map[0] + 1) * sat_problem._edge_feature.squeeze().to(torch.int))[
                         sat_problem._graph_map[1] == j]
-                    function_str = [i for i in map(str, functions.numpy()) if abs(int(i) - 1) not in deactivate_varaibles]
+                    function_str = [i for i in map(str, clause.numpy()) if abs(int(i)) - 1 not in deactivate_varaibles]
                     if len(function_str) == 0:
                         return False, None
                     sat_str += ' '.join(function_str)
                     sat_str += ' 0\n'
+
             res = util.use_solver(sat_str)
             if res:
                 self._temperature += 1
-                break
-            else:
-                repeat_num -= 1
+                return res, (np.array(variables)[indices] + 1, (symbols[indices].squeeze() > 0).numpy())
+            repeat_num -= 1
+            symbols_ = -1 * symbols
+
         return res, (np.array(variables)[indices] + 1, (symbols[indices].squeeze() > 0).numpy())
 
 
