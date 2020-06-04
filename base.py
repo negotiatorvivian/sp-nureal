@@ -27,6 +27,7 @@ class SATProblem(object):
         self._edge_mask = None
         self._is_sat = 0.5 * torch.ones(self._batch_size, device = self._device)
         self._cnf_evaluator = solver.SatCNFEvaluator(device)
+        self.statistics = np.zeros(3)
 
     def setup_problem(self, data_batch, batch_replication):
         """

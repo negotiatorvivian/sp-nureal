@@ -33,12 +33,9 @@ class SupervisedGraphSage(nn.Module):
         if len(variables) != sat_problem._variable_num:
             solution = sat_problem._solution.detach()
             solution[nodes] = torch.tensor(variables, dtype = torch.float)
-            # mask = torch.ones((sat_problem._variable_num, 1), dtype = torch.float)
-            # mask[nodes] = 1 - variables
             mask = solution.unsqueeze(1)
         else:
             mask = torch.tensor(variables, dtype = torch.float).unsqueeze(1)
-            # mask = sat_problem._solution.detach()
 
         '''计算 sat_problem 的可满足子句数'''
         _, output, certain_vars = sat_problem._post_process_predictions(mask)
@@ -165,6 +162,8 @@ def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_r
                 loss.backward()
 
             optimizer.step()
+
+            print('true: %d, false: %d, uncertain: %d'%(int(sat_problem.statistics[0]), int(sat_problem.statistics[1]), int(sat_problem.statistics[2])))
 
         for model in model_list:
             _module(model)._global_step += 1

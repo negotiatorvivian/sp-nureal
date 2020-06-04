@@ -130,7 +130,13 @@ class SatCNFEvaluator(nn.Module):
             res = util.use_solver(sat_str)
             if res:
                 self._temperature += 1
+                sat_problem.statistics[0] += 1
                 return res, (np.array(variables)[indices] + 1, (symbols[indices].squeeze() > 0).numpy())
+            elif res is False:
+                sat_problem.statistics[1] += 1
+            else:
+                sat_problem.statistics[2] += 1
+
             repeat_num -= 1
             symbols_ = -1 * symbols
 
