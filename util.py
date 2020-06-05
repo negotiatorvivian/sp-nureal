@@ -307,12 +307,12 @@ def use_solver(sat_str):
     with open(root_path + '/datasets/temp.cnf', 'w+') as f:
         f.write(sat_str)
     f = open(root_path + '/datasets/temp.cnf', 'r')
-    # process = subprocess.Popen(root_path + '/glucose_release', stdin = f, stdout = subprocess.PIPE, encoding = 'utf-8')
-    process = subprocess.Popen('z3', stdin = f, stdout = subprocess.PIPE, encoding = 'utf-8')
+    process = subprocess.Popen(root_path + '/glucose_release', stdin = f, stdout = subprocess.PIPE, encoding = 'utf-8')
+    # process = subprocess.Popen('z3', stdin = f, stdout = subprocess.PIPE, encoding = 'utf-8')
     try:
         outs, errs = process.communicate(timeout = 20)
-        #if outs.find('s SATISFIABLE') >= 0:
-        if outs.find('sat') >= 0:
+        if outs.find('s SATISFIABLE') >= 0:
+        # if outs.find('sat') >= 0:
             return True
         return False
     except:

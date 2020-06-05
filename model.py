@@ -50,7 +50,7 @@ class SupervisedGraphSage(nn.Module):
     def loss(self, nodes, labels, sat_problem):
         scores = self.forward(nodes, sat_problem)
         # return self.lent(scores.squeeze(1), labels)
-        return self.lent(scores, ((labels+1)/2).to(torch.long))
+        return self.lent(scores, ((labels + 1) / 2).to(torch.long))
 
 
 def load_cora(dimacs_file):
@@ -163,8 +163,6 @@ def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_r
 
             optimizer.step()
 
-            print('true: %d, false: %d, uncertain: %d'%(int(sat_problem.statistics[0]), int(sat_problem.statistics[1]), int(sat_problem.statistics[2])))
-
         for model in model_list:
             _module(model)._global_step += 1
 
@@ -218,6 +216,10 @@ def test_batch(data_loader, errors, model_list, device, batch_replication, use_c
             del graph_feat
             del label
             del edge_feature
+            print(
+                'true: %d, false: %d, uncertain: %d' % (int(sat_problem.statistics[0]), int(sat_problem.statistics[1]),
+                                                        int(sat_problem.statistics[2])))
+
     return errors / total_example_num.cpu().numpy()
 
 

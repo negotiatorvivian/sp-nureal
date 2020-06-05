@@ -369,7 +369,7 @@ class PropagatorDecimatorSolverBase(nn.Module):
         self._predictor = SurveyNeuralPredictor(device, hidden_dimension, self._predict_dimension, self._edge_dimension,
                                                 self._meta_dimension, agg_hidden_dimension, func_hidden_dimension,
                                                 agg_func_dimension, self._variable_classifier)
-        self._cnf_evaluator = solver.SatCNFEvaluator(device, temperature)
+        self._cnf_evaluator = solver.SatCNFEvaluator(device)
         self._loss_evaluator = solver.SatLossEvaluator(alpha = alpha, device = self._device)
 
         self._module_list.append(self._propagator)
@@ -377,6 +377,8 @@ class PropagatorDecimatorSolverBase(nn.Module):
 
         self._global_step = nn.Parameter(torch.tensor([0], dtype = torch.float, device = self._device),
                                          requires_grad = False)
+        # self._temperature = nn.Parameter(torch.tensor([temperature], dtype = torch.float, device = self._device),
+        #                                  requires_grad = False)
         self._name = name
         self._local_search_iterations = local_search_iterations
         self._eps = 1e-8 * torch.ones(1, device = self._device, requires_grad = False)
@@ -539,11 +541,12 @@ class PropagatorDecimatorSolverBase(nn.Module):
         """停用模型已找到SAT解决方案的CNF"""
 
         _, res, _ = self._cnf_evaluator(variable_prediction = prediction[0],
-                                        graph_map = sat_problem._graph_map,
-                                        batch_variable_map = sat_problem._batch_variable_map,
-                                        batch_function_map = sat_problem._batch_function_map,
-                                        edge_feature = sat_problem._edge_feature,
-                                        meta_data = sat_problem._meta_data)  # .detach().cpu().numpy()
+                                                     graph_map = sat_problem._graph_map,
+                                                     batch_variable_map = sat_problem._batch_variable_map,
+                                                     batch_function_map = sat_problem._batch_function_map,
+                                                     edge_feature = sat_problem._edge_feature,
+                                                     meta_data = sat_problem._meta_data, is_training = False)
+        # .detach().cpu().numpy()
 
         if sat_problem._batch_replication > 1:
             real_batch = torch.mm(sat_problem._replication_mask_tuple[1], (res[0] > 0.5).float())
@@ -556,10 +559,11 @@ class PropagatorDecimatorSolverBase(nn.Module):
                                     batch_function_map, edge_feature, meta_data, vf_mask, sat_problem = None):
         """交叉验证"""
         _, res, _ = self._cnf_evaluator(variable_prediction = prediction, graph_map = graph_map,
-                                        batch_variable_map = batch_variable_map,
-                                        batch_function_map = batch_function_map,
-                                        edge_feature = edge_feature, vf_mask = vf_mask,
-                                        sat_problem = sat_problem)
+                                                     batch_variable_map = batch_variable_map,
+                                                     batch_function_map = batch_function_map,
+                                                     edge_feature = edge_feature, vf_mask = vf_mask,
+                                                     sat_problem = sat_problem, is_training = False)
+        # self._temperature = temperature
         recall = torch.sum(label * ((res[0] > 0.5).float() - label).abs()) / torch.max(torch.sum(label), self._eps)
         accuracy = evaluator((res[0] > 0.5).float(), label).unsqueeze(0)
         loss_value = self._loss_evaluator(variable_prediction = prediction, label = label, graph_map = graph_map,
@@ -604,8 +608,8 @@ class PropagatorDecimatorSolverBase(nn.Module):
 
 class SPNueralBase:
     def __init__(self, dimacs_file, validate_file = None, epoch_replication = 3, batch_replication = 1, epoch = 100,
-                 batch_size = 2000, hidden_dimension = 1, feature_dim = 100, train_outer_recurrence_num = 1, temperature = 1,
-                 alpha = 0.1, error_dim = 3, use_cuda = True):
+                 batch_size = 2000, hidden_dimension = 1, feature_dim = 100, train_outer_recurrence_num = 1,
+                 temperature = 10, alpha = 0.1, error_dim = 3, use_cuda = True):
         self._use_cuda = use_cuda and torch.cuda.is_available()
         '''读入数据路径'''
         self._dimacs_file = dimacs_file
