@@ -9,7 +9,7 @@ import random
 from encoders import Encoder
 from aggregators import MeanAggregator
 from util import CompactDimacs, Perceptron, update_solution
-from base import SATProblem
+from solver import SATProblem
 
 
 class SupervisedGraphSage(nn.Module):
@@ -70,7 +70,7 @@ def _module(model):
     return model.module if isinstance(model, nn.DataParallel) else model
 
 
-def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_replication, hidden_dimension,
+def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, device, batch_replication, hidden_dimension,
                 feature_dim, train_outer_recurrence_num, use_cuda = True, is_train = True, randomized = True):
     np.random.seed(1)
     random.seed(1)
@@ -139,17 +139,12 @@ def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_r
                     variable_prediction, state = model(init_state = state, sat_problem = sat_problem,
                                                        is_training = True)
                     '''计算 sp_aggregator 的loss'''
-                    loss += model.compute_loss(is_train, variable_prediction, label, sat_problem._graph_map,
-                                               sat_problem._batch_variable_map, sat_problem._batch_function_map,
-                                               sat_problem._edge_feature, sat_problem._meta_data)
-                    # '''根据训练结果计算CNF预测值 确定某些变量的值'''
-                    # res, output, _ = sat_problem._post_process_predictions(variable_prediction)
-                    # if res is None:
-                    #     break
-                    # if len(answers.flatten()) > 0:
-                    #     '''取出子句不满足的所有边的集合'''
-                    #     edges = answers.repeat(batch_replication)[res]
-                    #     loss += graphsage.loss(res, Variable(torch.FloatTensor(edges)), sat_problem)
+                    # loss += model.compute_loss(is_train, variable_prediction, label, sat_problem._graph_map,
+                    #                            sat_problem._batch_variable_map, sat_problem._batch_function_map,
+                    #                            sat_problem._edge_feature, sat_problem._meta_data)
+
+                    loss += solver_base._compute_loss(_module(model), None, is_train, variable_prediction, label,
+                                                      sat_problem)
 
                     for p in variable_prediction:
                         del p
@@ -175,7 +170,7 @@ def train_batch(data_loader, total_loss, rep, epoch, model_list, device, batch_r
     return total_loss / total_example_num.cpu().numpy()
 
 
-def test_batch(data_loader, errors, model_list, device, batch_replication, use_cuda = True, is_train = False,
+def test_batch(solver_base, data_loader, errors, model_list, device, batch_replication, use_cuda = True, is_train = False,
                randomized = True):
     np.random.seed(1)
     random.seed(1)
@@ -196,10 +191,8 @@ def test_batch(data_loader, errors, model_list, device, batch_replication, use_c
                 variable_prediction, state = model(init_state = state, sat_problem = sat_problem,
                                                    is_training = True)
                 '''计算 sp_aggregator 的 error'''
-                errors[:, k] += model.compute_loss(is_train, variable_prediction, label, sat_problem._graph_map,
-                                                   sat_problem._batch_variable_map, sat_problem._batch_function_map,
-                                                   sat_problem._edge_feature, sat_problem._meta_data,
-                                                   sat_problem._vf_mask_tuple[3], sat_problem)
+                errors[:, k] += solver_base._compute_loss(_module(model), None, is_train, variable_prediction, label,
+                                                          sat_problem)
 
                 for p in variable_prediction:
                     del p
