@@ -315,12 +315,12 @@ class SATProblem(object):
         adj_lists = defaultdict(set)
         node_list = []
         self.nodes = ((self._signed_mask_tuple[0]._indices()[0].to(torch.float) + 1) * self._edge_feature.squeeze(1)) \
-            .to(torch.long)
+            .to(torch.long).cpu()
         for j in range(self._variable_num):
-            indices = self._graph_map[1][np.argwhere(torch.abs(self.nodes) == j + 1)][0].to(torch.long)
-            functions = np.array(self._vf_mask_tuple[3].to(torch.long).to_dense()[indices, :][:, j] * (indices + 1))
+            indices = self._graph_map[1].cpu()[np.argwhere(torch.abs(self.nodes) == j + 1)][0].to(torch.long)
+            functions = np.array(self._vf_mask_tuple[3].cpu().to(torch.long).to_dense()[indices, :][:, j] * (indices + 1))
             node_list.append(functions)
-            edge_indices = np.argwhere(self._signed_mask_tuple[2].to_dense()[indices] != 0)[1]
+            edge_indices = np.argwhere(self._signed_mask_tuple[2].cpu().to_dense()[indices] != 0)[1]
             relations = set([abs(i) - 1 for i in self.nodes[edge_indices].numpy()])
             if len(relations) < 2:
                 continue
@@ -350,8 +350,7 @@ class PropagatorDecimatorSolverBase(nn.Module):
 
     def __init__(self, device, name, feature_dim, hidden_dimension,
                  agg_hidden_dimension = 100, func_hidden_dimension = 100, agg_func_dimension = 50,
-                 classifier_dimension = 50, local_search_iterations = 1000, temperature = 1, alpha = 0.1,
-                 pure_sp = True):
+                 classifier_dimension = 50, local_search_iterations = 1000, alpha = 0.1, pure_sp = True):
 
         super(PropagatorDecimatorSolverBase, self).__init__()
         self._device = device
@@ -633,7 +632,7 @@ class SPNueralBase:
         torch.set_num_threads(self._num_cores)
         '''初始化模型列表'''
         model_list = [PropagatorDecimatorSolverBase(self._device, "SP-Nueral", feature_dim, self._gru_hidden_dimension,
-                                                    temperature = temperature, alpha = alpha, pure_sp = False)]
+                                                    alpha = alpha, pure_sp = False)]
         '''将模型放到 GPU 上运行 如果 cuda 设备可用'''
         self._model_list = [self._set_device(model) for model in model_list]
 
