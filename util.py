@@ -44,8 +44,8 @@ class DynamicBatchDivider(object):
 
         else:
 
-            indices = sorted(range(len(edge_num)), reverse=True, key=lambda k: edge_num[k])
-            sorted_edge_num = sorted(edge_num, reverse=True)
+            indices = sorted(range(len(edge_num)), reverse = True, key = lambda k: edge_num[k])
+            sorted_edge_num = sorted(edge_num, reverse = True)
 
             i = 0
 
@@ -80,7 +80,7 @@ class DynamicBatchDivider(object):
 class FactorGraphDataset(data.Dataset):
     """将 CNF 文件转换为json格式 返回的是一个迭代器 data_loader"""
 
-    def __init__(self, input_file, limit, hidden_dim, max_cache_size=100000, epoch_size=0, batch_replication=3,
+    def __init__(self, input_file, limit, hidden_dim, max_cache_size = 100000, epoch_size = 0, batch_replication = 3,
                  parallel = False):
 
         self._cache = collections.OrderedDict()
@@ -106,7 +106,7 @@ class FactorGraphDataset(data.Dataset):
         result = self._convert_line(line)
 
         if len(self._cache) >= self._max_cache_size:
-            self._cache.popitem(last=False)
+            self._cache.popitem(last = False)
 
         self._cache[idx] = result
         return result
@@ -115,9 +115,9 @@ class FactorGraphDataset(data.Dataset):
         input_data = json.loads(json_str)
         variable_num, function_num = input_data[0]
 
-        variable_ind = np.abs(np.array(input_data[1], dtype=np.int32)) - 1
-        function_ind = np.abs(np.array(input_data[2], dtype=np.int32)) - 1
-        edge_feature = np.sign(np.array(input_data[1], dtype=np.float32))
+        variable_ind = np.abs(np.array(input_data[1], dtype = np.int32)) - 1
+        function_ind = np.abs(np.array(input_data[2], dtype = np.int32)) - 1
+        edge_feature = np.sign(np.array(input_data[1], dtype = np.float32))
         graph_map = np.stack((variable_ind, function_ind))
 
         answers = []
@@ -149,7 +149,8 @@ class FactorGraphDataset(data.Dataset):
 
         for i in range(segment_num):
             '''graph features叠加'''
-            graph_feat_batch += [None if graph_feat[i][0] is None else torch.from_numpy(np.stack(graph_feat[i])).float()]
+            graph_feat_batch += [
+                None if graph_feat[i][0] is None else torch.from_numpy(np.stack(graph_feat[i])).float()]
 
             '''edge feature叠加'''
             edge_feature_batch += [torch.from_numpy(np.expand_dims(np.concatenate(edge_feature[i]), 1)).float()]
@@ -157,16 +158,16 @@ class FactorGraphDataset(data.Dataset):
             '''标签叠加'''
             label_batch += [torch.from_numpy(np.expand_dims(np.array(label[i]), 1)).float()]
 
-            g_map_b = np.zeros((2, 0), dtype=np.int32)
-            v_map_b = np.zeros(0, dtype=np.int32)
-            f_map_b = np.zeros(0, dtype=np.int32)
+            g_map_b = np.zeros((2, 0), dtype = np.int32)
+            v_map_b = np.zeros(0, dtype = np.int32)
+            f_map_b = np.zeros(0, dtype = np.int32)
             variable_ind = 0
             function_ind = 0
 
             for j in range(len(graph_map[i])):
                 graph_map[i][j][0, :] += variable_ind
                 graph_map[i][j][1, :] += function_ind
-                g_map_b = np.concatenate((g_map_b, graph_map[i][j]), axis=1)
+                g_map_b = np.concatenate((g_map_b, graph_map[i][j]), axis = 1)
 
                 v_map_b = np.concatenate((v_map_b, np.tile(j, variable_num[i][j])))
                 f_map_b = np.concatenate((f_map_b, np.tile(j, function_num[i][j])))
@@ -182,23 +183,23 @@ class FactorGraphDataset(data.Dataset):
 
     @staticmethod
     def get_loader(input_file, limit, hidden_dim, batch_size, shuffle, num_workers,
-                    max_cache_size=100000, use_cuda=True, epoch_size=0, batch_replication=1, parallel = False):
+                   max_cache_size = 100000, use_cuda = True, epoch_size = 0, batch_replication = 1, parallel = False):
 
         dataset = FactorGraphDataset(
-            input_file=input_file,
-            limit=limit,
-            hidden_dim=hidden_dim,
-            max_cache_size=max_cache_size,
-            epoch_size=epoch_size,
-            batch_replication=batch_replication,
+            input_file = input_file,
+            limit = limit,
+            hidden_dim = hidden_dim,
+            max_cache_size = max_cache_size,
+            epoch_size = epoch_size,
+            batch_replication = batch_replication,
             parallel = parallel)
         data_loader = torch.utils.data.DataLoader(
-            dataset=dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            collate_fn=dataset.dag_collate_fn,
-            pin_memory=use_cuda)
+            dataset = dataset,
+            batch_size = batch_size,
+            shuffle = shuffle,
+            num_workers = num_workers,
+            collate_fn = dataset.dag_collate_fn,
+            pin_memory = use_cuda)
 
         return data_loader
 
@@ -246,7 +247,7 @@ class Perceptron(nn.Module):
     def __init__(self, input_dimension, hidden_dimension, output_dimension):
         super(Perceptron, self).__init__()
         self._layer1 = nn.Linear(input_dimension, hidden_dimension)
-        self._layer2 = nn.Linear(hidden_dimension, output_dimension, bias=False)
+        self._layer2 = nn.Linear(hidden_dimension, output_dimension, bias = False)
 
     def forward(self, inp):
         return torch.sigmoid(self._layer2(F.relu(self._layer1(inp))))
@@ -304,14 +305,14 @@ def sparse_argmax(x, mask, device):
 def use_solver(sat_str):
     """使用确定性求解器求解"""
     root_path = os.getcwd()
-    with open(root_path + '/datasets/temp.cnf', 'w+') as f:
+    with open(os.path.join(root_path, 'datasets', 'temp.cnf'), 'w+') as f:
         f.write(sat_str)
-    f = open(root_path + '/datasets/temp.cnf', 'r')
+    f = open(os.path.join(root_path, 'datasets', 'temp.cnf'), 'r')
     # process = subprocess.Popen(root_path + '/glucose_release', stdin = f, stdout = subprocess.PIPE, encoding = 'utf-8')
     process = subprocess.Popen('z3', stdin = f, stdout = subprocess.PIPE, encoding = 'utf-8')
     try:
         outs, errs = process.communicate(timeout = 20)
-        #if outs.find('s SATISFIABLE') >= 0:
+        # if outs.find('s SATISFIABLE') >= 0:
         if outs.find('sat') >= 0:
             return True
         return False
@@ -319,4 +320,3 @@ def use_solver(sat_str):
         process.kill()
         print('process killed')
         return None
-
