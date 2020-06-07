@@ -220,8 +220,10 @@ class SurveyAggregator(nn.Module):
             '''用norm_var_layer采样产生的data作为初始化数据'''
             # variable_state = self.norm_var_layer(torch.rand(edge_num, self._embed_dim, dtype = torch.float32))
             # function_state = self.norm_func_layer(torch.rand(edge_num, self._embed_dim, dtype = torch.float32))
-            variable_state = torch.rand(edge_num, self._function_message_dim, dtype = torch.float32)
-            function_state = torch.rand(edge_num, self._variable_message_dim, dtype = torch.float32)
+            variable_state = torch.rand(edge_num, self._function_message_dim, dtype = torch.float32,
+                                        device = self._device)
+            function_state = torch.rand(edge_num, self._variable_message_dim, dtype = torch.float32,
+                                        device = self._device)
             '''第二列数据用于表示外来影响因素(目前模型中没有,因此值为空)'''
             function_state[:, 1] = 0
         else:

@@ -8,6 +8,9 @@ from collections import defaultdict
 
 import util
 
+import warnings
+warnings.filterwarnings("ignore")
+
 
 class SATProblem(object):
 
@@ -370,12 +373,14 @@ class SatCNFEvaluator(nn.Module):
         clause_values = (clause_values > 0).float()
         res = False
         if vf_mask is not None:
+            vf_mask_ = vf_mask.cpu()
+            clause_values_ = clause_values.cpu()
             '''所有出现在不满足的子句中的变量并去重'''
-            unsat_vars = vf_mask.to_dense()[np.argwhere(clause_values.squeeze(1) == 0)[0]]
+            unsat_vars = vf_mask_.to_dense()[np.argwhere(clause_values_.squeeze(1) == 0)[0]]
             unsat_vars = set(np.argwhere(unsat_vars > 0)[1].numpy())
             self._unsat = unsat_vars
             '''所有出现在满足中的子句中的变量并去重'''
-            sat_vars = vf_mask.to_dense()[np.argwhere(clause_values.squeeze(1) == 1)[0]]
+            sat_vars = vf_mask_.to_dense()[np.argwhere(clause_values_.squeeze(1) == 1)[0]]
             sat_vars = set(np.argwhere(sat_vars > 0)[1].numpy())
             '''相减后获得差集: 即可以确定值的变量 -> 变量所在的子句均为可满足子句'''
             self._sat = sat_vars - self._unsat
@@ -395,7 +400,7 @@ class SatCNFEvaluator(nn.Module):
     def simplify(self, sat_problem, variable_prediction, is_training):
         variables = list(self._sat)
         functions = np.array(sat_problem.node_adj_lists)[variables]
-        symbols = ((variable_prediction[variables] > 0.5).to(torch.float) * 2 - 1).to(torch.long)
+        symbols = ((variable_prediction[variables] > 0.5).to(torch.float) * 2 - 1).to(torch.long).cpu()
         try_times = 3
         ending = ''
         function_num_addition = 0
@@ -422,7 +427,7 @@ class SatCNFEvaluator(nn.Module):
                 if j not in deactivate_functions:
                     clause = ((sat_problem._graph_map[0] + 1) * sat_problem._edge_feature.squeeze().to(torch.int))[
                         sat_problem._graph_map[1] == j]
-                    function_str = [i for i in map(str, clause.numpy()) if abs(int(i)) - 1 not in deactivate_varaibles]
+                    function_str = [i for i in map(str, clause.cpu().numpy()) if abs(int(i)) - 1 not in deactivate_varaibles]
                     if len(function_str) == 0:
                         return False, None
                     sat_str += ' '.join(function_str)
@@ -437,6 +442,7 @@ class SatCNFEvaluator(nn.Module):
             elif res is False:
                 sat_problem.statistics[1] += 1
                 try_times -= 1
+                print(sat_problem.statistics, try_times)
                 self._temperature += 0.5
                 unsat_condition = (np.array(deactivate_varaibles) + 1) * np.array(symbols[indices]).flatten() * -1
                 ending += ' '.join([str(i) for i in unsat_condition])
@@ -466,12 +472,12 @@ class SatLossEvaluator(nn.Module):
     @staticmethod
     def safe_log(x, eps):
         """计算 log 值"""
-        max_val = torch.max(x[np.argwhere(torch.isfinite(x.squeeze()) == 1)[0]])
-        '''torch.clamp 用于将 x 控制在 [0, max_val.data] 区间内'''
-        x = torch.clamp(x, 0, max_val.data).clone().detach().requires_grad_(True)
-        a = torch.max(x, eps)
-        loss = a.log()
-        return loss
+        # max_val = torch.max(x[np.argwhere(torch.isfinite(x.squeeze()) == 1)[0]])
+        # '''torch.clamp 用于将 x 控制在 [0, max_val.data] 区间内'''
+        # x = torch.clamp(x, 0, max_val.data).clone().detach().requires_grad_(True)
+        # a = torch.max(x, eps)
+        # loss = a.log()
+        return torch.tensor(torch.max(x, eps).log(), requires_grad=True)
 
     @staticmethod
     def compute_masks(graph_map, batch_variable_map, batch_function_map, edge_feature, device):

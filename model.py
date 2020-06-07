@@ -88,7 +88,7 @@ def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, de
             total_example_num += (batch_variable_map.max() + 1)
             sat_problem = SATProblem((graph_map, batch_variable_map, batch_function_map, edge_feature, answers, None),
                                      device, batch_replication)
-            loss = torch.zeros(1, device = device)
+            loss = torch.zeros(1, device = device, requires_grad = False)
             '''将所有CNF的答案拼接起来, 有解才执行 graphSage 模型'''
             if len(answers[0].flatten()) > 0:
                 answers = np.concatenate(answers, axis = 0)
@@ -129,7 +129,8 @@ def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, de
                 for i in range(train_outer_recurrence_num):
                     loss += graphsage.loss(nodes, Variable(torch.FloatTensor(answers)), sat_problem)
             else:
-                optimizer = torch.optim.SGD(optim_list, lr = 0.3, weight_decay = 0.01)
+               # optimizer = torch.optim.SGD(optim_list, lr = 0.3, weight_decay = 0.01)
+                optimizer = torch.optim.Adam(optim_list, lr = 0.3, weight_decay = 0.01)
                 optimizer.zero_grad()
             for (k, model) in enumerate(model_list):
                 '''初始化变量state, 可选择随机是否随机初始化 其中 batch_replication 表示同一个CNF数据重复次数'''

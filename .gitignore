@@ -5,3 +5,4 @@ Models
 __pycache__
 glucose_release
 cadical
+util.py

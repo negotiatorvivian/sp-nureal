@@ -39,7 +39,7 @@ class PropagatorDecimatorTrainer(SPNueralBase):
                                         sat_problem._vf_mask_tuple[3], sat_problem = sat_problem, is_training = False)
         # self._temperature = temperature
         recall = torch.sum(label * ((res[0] > 0.5).float() - label).abs()) / torch.max(torch.sum(label), model._eps)
-        accuracy = nn.L1Loss((res[0] > 0.5).float(), label).unsqueeze(0)
+        accuracy = nn.L1Loss()((res[0] > 0.5).float(), label).unsqueeze(0)
         loss_value = self._loss_evaluator(prediction, label, sat_problem._graph_map, sat_problem._batch_variable_map,
                                           sat_problem._batch_function_map, sat_problem._edge_feature,
                                           sat_problem._meta_data, global_step = model._global_step,
