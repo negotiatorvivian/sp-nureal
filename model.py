@@ -25,31 +25,34 @@ class SupervisedGraphSage(nn.Module):
         self.weight = nn.Parameter(torch.FloatTensor(feature_dim, enc.embed_dim).to(device))
         init.xavier_uniform_(self.weight)
 
-    def forward(self, nodes, sat_problem):
+    def forward(self, nodes, sat_problem, is_train):
         embeds = self.enc(nodes)
         scores = self.weight.mm(embeds).t()
-        variables = scores.data.cpu().numpy().argmax(axis = 1)
-        # ''' 线性层计算 score'''
-        # scores = self._prediction_layer(self.weight.mm(embeds).t())
-        if len(variables) != sat_problem._variable_num:
-            solution = sat_problem._solution.detach()
-            solution[nodes] = torch.tensor(variables, dtype = torch.float)
-            mask = solution.unsqueeze(1)
-        else:
-            mask = torch.tensor(variables, dtype = torch.float, device = self._device).unsqueeze(1)
+        if not is_train:
+            variables = scores.data.cpu().numpy().argmax(axis = 1)
+            # ''' 线性层计算 score'''
+            # scores = self._prediction_layer(self.weight.mm(embeds).t())
+            if len(variables) != sat_problem._variable_num:
+                solution = sat_problem._solution.detach()
+                solution[nodes] = torch.tensor(variables, dtype = torch.float)
+                mask = solution.unsqueeze(1)
+            else:
+                mask = torch.tensor(variables, dtype = torch.float, device = self._device).unsqueeze(1)
 
-        '''计算 sat_problem 的可满足子句数'''
-        _, output, certain_vars = sat_problem._post_process_predictions(mask)
-        if output:
-            sat_problem._active_variables[certain_vars[0] - 1] = 0
-            sat_problem._solution[torch.tensor(certain_vars[0] - 1)] = torch.tensor(certain_vars[1], dtype = torch.float, device = self._device)
-            # mask.numpy()[certain_vars[0]][:, 0] = certain_vars[1]
-            '''更新 sat_problem 的解'''
-            update_solution(mask, sat_problem)
+            '''计算 sat_problem 的可满足子句数'''
+            _, output, certain_vars = sat_problem._post_process_predictions(mask)
+            if output:
+                sat_problem._active_variables[certain_vars[0] - 1] = 0
+                sat_problem._solution[torch.tensor(certain_vars[0] - 1)] = torch.tensor(certain_vars[1],
+                                                                                        dtype = torch.float,
+                                                                                        device = self._device)
+                # mask.numpy()[certain_vars[0]][:, 0] = certain_vars[1]
+                '''更新 sat_problem 的解'''
+                update_solution(mask, sat_problem)
         return scores
 
-    def loss(self, nodes, labels, sat_problem):
-        scores = self.forward(nodes, sat_problem)
+    def loss(self, nodes, labels, sat_problem, is_train):
+        scores = self.forward(nodes, sat_problem, is_train)
         # return self.lent(scores.squeeze(1), labels)
         return self.lent(scores, ((labels + 1) / 2).to(torch.long).cuda())
 
@@ -91,7 +94,7 @@ def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, de
                                      device, batch_replication)
             loss = torch.zeros(1, device = device, requires_grad = False)
             '''将所有CNF的答案拼接起来, 有解才执行 graphSage 模型'''
-            if len(answers[0].flatten()) > 0 and False:
+            if len(answers[0].flatten()) > 0:
                 answers = np.concatenate(answers, axis = 0)
                 '''展开所有子句的变量(绝对值)'''
                 variable_map = torch.cat(((torch.abs(sat_problem.nodes).to(torch.long) - 1).reshape(1, -1),
@@ -127,9 +130,10 @@ def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, de
                 nodes = [i for i in range(sat_problem._variable_num)]
                 # sample_length = int(len(nodes)/train_outer_recurrence_num)
                 for i in range(train_outer_recurrence_num):
-                    loss += graphsage.loss(nodes, Variable(torch.FloatTensor(answers)), sat_problem)
+                    loss += graphsage.loss(nodes, Variable(torch.FloatTensor(answers)), sat_problem,
+                                           i < (train_outer_recurrence_num - 1))
             else:
-               # optimizer = torch.optim.SGD(optim_list, lr = 0.3, weight_decay = 0.01)
+                # optimizer = torch.optim.SGD(optim_list, lr = 0.3, weight_decay = 0.01)
                 optimizer = torch.optim.Adam(optim_list, lr = 0.3, weight_decay = 0.01)
                 optimizer.zero_grad()
             for (k, model) in enumerate(model_list):

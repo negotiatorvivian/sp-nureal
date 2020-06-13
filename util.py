@@ -308,8 +308,8 @@ def use_solver(sat_str):
     file_path = os.path.join(root_path, 'datasets', 'temp.cnf')
     with open(file_path, 'w+') as f:
         f.write(sat_str)
-    # process = subprocess.Popen([root_path + '/glucose_release', file_path], stdout = subprocess.PIPE, encoding = 'utf-8')
-    process = subprocess.Popen(['z3', file_path], stdout = subprocess.PIPE, encoding = 'utf-8')
+    process = subprocess.Popen([root_path + '/glucose_release', file_path], stdout = subprocess.PIPE, encoding = 'utf-8')
+    # process = subprocess.Popen(['z3', file_path], stdout = subprocess.PIPE, encoding = 'utf-8')
     try:
         outs, errs = process.communicate(timeout = 20)
         # if outs.find('s SATISFIABLE') >= 0:
