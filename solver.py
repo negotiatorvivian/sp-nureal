@@ -306,19 +306,24 @@ class SATProblem(object):
 
     def _compute_adj_list(self):
         """计算与变量 n 同时出现在某一个子句中的变量集合"""
-        adj_lists = defaultdict(set)
+        # adj_lists = defaultdict(set)
+        adj_lists = {}
         node_list = []
         self.nodes = ((self._signed_mask_tuple[0]._indices()[0].to(torch.float) + 1) * self._edge_feature.squeeze(1)) \
-            .to(torch.long).cpu()
+            .to(torch.long)
         for j in range(self._variable_num):
-            indices = self._graph_map[1].cpu()[np.argwhere(torch.abs(self.nodes) == j + 1)][0].to(torch.long)
-            functions = np.array(self._vf_mask_tuple[3].cpu().to(torch.long).to_dense()[indices, :][:, j] * (indices + 1))
+            indices = self._graph_map[1][torch.abs(self.nodes) == j + 1].to(torch.long)
+            # functions = np.array(self._vf_mask_tuple[3].to(torch.long).to_dense()[indices, :][:, j] * (indices + 1))
+            functions = self._vf_mask_tuple[3].to(torch.long).to_dense()[indices.cpu().numpy(), :][:, j] * (indices + 1)
             node_list.append(functions)
             edge_indices = np.argwhere(self._signed_mask_tuple[2].cpu().to_dense()[indices] != 0)[1]
-            relations = set([abs(i) - 1 for i in self.nodes[edge_indices].numpy()])
+            # relations = set([abs(i) - 1 for i in self.nodes[edge_indices].numpy()])
+            relations = torch.unique(torch.abs(self.nodes[edge_indices]) - 1, sorted = False)
+
             if len(relations) < 2:
                 continue
-            adj_lists[j] = relations - set([j])
+            # adj_lists[j] = relations - set([j])
+            adj_lists[j] = relations
         return adj_lists, node_list
 
     def _post_process_predictions(self, prediction, is_training = True):
@@ -400,7 +405,7 @@ class SatCNFEvaluator(nn.Module):
     def simplify(self, sat_problem, variable_prediction, is_training):
         variables = list(self._sat)
         functions = np.array(sat_problem.node_adj_lists)[variables]
-        symbols = ((variable_prediction[variables] > 0.5).to(torch.float) * 2 - 1).to(torch.long).cpu()
+        symbols = ((variable_prediction[variables] > 0.5).to(torch.float) * 2 - 1).to(torch.long)
         try_times = 3
         ending = ''
         function_num_addition = 0
@@ -416,7 +421,7 @@ class SatCNFEvaluator(nn.Module):
             deactivate_varaibles = []
             for j in range(len(indices)):
                 i = indices[j]
-                pos_functions = np.array(functions[i][np.argwhere(torch.tensor(functions[i]) * symbols[i] > 0)]).flatten()
+                pos_functions = np.array(functions[i][torch.tensor(functions[i]) * symbols[i] > 0].cpu()).flatten()
                 if len(pos_functions) < len(functions[i]):
                     deactivate_varaibles.append(variables[i])
                 deactivate_functions.extend(np.abs(pos_functions) - 1)
@@ -438,13 +443,13 @@ class SatCNFEvaluator(nn.Module):
             if res:
                 self._temperature += 1
                 sat_problem.statistics[0] += 1
-                return res, (np.array(variables)[indices] + 1, (symbols[indices].squeeze() > 0).numpy())
+                return res, (np.array(variables)[indices] + 1, (symbols[indices].squeeze() > 0))
             elif res is False:
                 sat_problem.statistics[1] += 1
                 try_times -= 1
                 print(sat_problem.statistics, try_times)
-                self._temperature += 0.5
-                unsat_condition = (np.array(deactivate_varaibles) + 1) * np.array(symbols[indices]).flatten() * -1
+                # self._temperature += 0.5
+                unsat_condition = (np.array(deactivate_varaibles) + 1) * np.array(symbols[indices].cpu()).flatten() * -1
                 ending += ' '.join([str(i) for i in unsat_condition])
                 ending += ' 0\n'
                 function_num_addition += 1
@@ -454,10 +459,11 @@ class SatCNFEvaluator(nn.Module):
                     self._temperature -= 1
                 try_times -= 1
                 sat_problem.statistics[2] += 1
-                for item in deactivate_varaibles:
-                    variables.remove(item)
+                if try_times > 0:
+                    for item in deactivate_varaibles:
+                        variables.remove(item)
 
-        return res, (np.array(variables)[indices] + 1, (symbols[indices].squeeze() > 0).numpy())
+        return res, (np.array(variables)[indices] + 1, (symbols[indices].squeeze() > 0))
 
 
 class SatLossEvaluator(nn.Module):

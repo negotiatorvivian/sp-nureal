@@ -10,10 +10,10 @@ import util
 
 class MeanAggregator(nn.Module):
 
-    def __init__(self, features, cuda = False, gru = False):
+    def __init__(self, features, device, gru = False):
         super(MeanAggregator, self).__init__()
         self.features = features
-        self.cuda = cuda
+        self.device = device
         self.gru = gru
 
     def forward(self, nodes, to_neighs, num_sample = 10):
@@ -30,13 +30,11 @@ class MeanAggregator(nn.Module):
         '''去重'''
         unique_nodes_list = list(set.union(*samp_neighs))
         unique_nodes = {n: i for i, n in enumerate(unique_nodes_list)}
-        mask = Variable(torch.zeros(len(samp_neighs), len(unique_nodes)))
+        mask = Variable(torch.zeros(len(samp_neighs), len(unique_nodes), device = self.device))
         '''获取变量节点的列坐标'''
         column_indices = [unique_nodes[n] for samp_neigh in samp_neighs for n in samp_neigh]
         row_indices = [i for i in range(len(samp_neighs)) for j in range(len(samp_neighs[i]))]
         mask[row_indices, column_indices] = 1
-        if self.cuda:
-            mask = mask.cuda()
         num_neigh = mask.sum(1, keepdim = True)
         mask = mask.div(num_neigh)
 
@@ -400,7 +398,7 @@ class SurveyNeuralPredictor(nn.Module):
 
         if len(sat_problem._meta_data[0]) > 0:
             graph_feat = torch.sparse.FloatTensor(b_variable_mask._indices(), torch.tensor(np.concatenate(
-                np.array(sat_problem._meta_data)), dtype = torch.float)).to_dense()
+                np.array(sat_problem._meta_data)), device = self._device, dtype = torch.float)).to_dense()
             graph_feat = torch.sum(torch.mm(variable_mask_transpose, graph_feat), 1).unsqueeze(1)
 
         if len(decimator_state) == 3:

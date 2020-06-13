@@ -14,20 +14,21 @@ from solver import SATProblem
 
 class SupervisedGraphSage(nn.Module):
 
-    def __init__(self, feature_dim, hidden_dim, enc, name):
+    def __init__(self, device, feature_dim, hidden_dim, enc, name):
         super(SupervisedGraphSage, self).__init__()
+        self._device = device
         self.enc = enc  # sp_encoder
         # self.lent = nn.L1Loss()
         self.lent = nn.CrossEntropyLoss()
         self._prediction_layer = Perceptron(feature_dim, hidden_dim, 1)
         self._name = name
-        self.weight = nn.Parameter(torch.FloatTensor(feature_dim, enc.embed_dim))
+        self.weight = nn.Parameter(torch.FloatTensor(feature_dim, enc.embed_dim).to(device))
         init.xavier_uniform_(self.weight)
 
     def forward(self, nodes, sat_problem):
         embeds = self.enc(nodes)
         scores = self.weight.mm(embeds).t()
-        variables = scores.data.numpy().argmax(axis = 1)
+        variables = scores.data.cpu().numpy().argmax(axis = 1)
         # ''' 线性层计算 score'''
         # scores = self._prediction_layer(self.weight.mm(embeds).t())
         if len(variables) != sat_problem._variable_num:
@@ -35,13 +36,13 @@ class SupervisedGraphSage(nn.Module):
             solution[nodes] = torch.tensor(variables, dtype = torch.float)
             mask = solution.unsqueeze(1)
         else:
-            mask = torch.tensor(variables, dtype = torch.float).unsqueeze(1)
+            mask = torch.tensor(variables, dtype = torch.float, device = self._device).unsqueeze(1)
 
         '''计算 sat_problem 的可满足子句数'''
         _, output, certain_vars = sat_problem._post_process_predictions(mask)
         if output:
             sat_problem._active_variables[certain_vars[0] - 1] = 0
-            sat_problem._solution[torch.tensor(certain_vars[0] - 1)] = torch.tensor(certain_vars[1], dtype = torch.float)
+            sat_problem._solution[torch.tensor(certain_vars[0] - 1)] = torch.tensor(certain_vars[1], dtype = torch.float, device = self._device)
             # mask.numpy()[certain_vars[0]][:, 0] = certain_vars[1]
             '''更新 sat_problem 的解'''
             update_solution(mask, sat_problem)
@@ -50,7 +51,7 @@ class SupervisedGraphSage(nn.Module):
     def loss(self, nodes, labels, sat_problem):
         scores = self.forward(nodes, sat_problem)
         # return self.lent(scores.squeeze(1), labels)
-        return self.lent(scores, ((labels + 1) / 2).to(torch.long))
+        return self.lent(scores, ((labels + 1) / 2).to(torch.long).cuda())
 
 
 def load_cora(dimacs_file):
@@ -90,7 +91,7 @@ def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, de
                                      device, batch_replication)
             loss = torch.zeros(1, device = device, requires_grad = False)
             '''将所有CNF的答案拼接起来, 有解才执行 graphSage 模型'''
-            if len(answers[0].flatten()) > 0:
+            if len(answers[0].flatten()) > 0 and False:
                 answers = np.concatenate(answers, axis = 0)
                 '''展开所有子句的变量(绝对值)'''
                 variable_map = torch.cat(((torch.abs(sat_problem.nodes).to(torch.long) - 1).reshape(1, -1),
@@ -104,21 +105,20 @@ def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, de
                 '''编码读入的数据'''
                 features = nn.Embedding(num_nodes_x, num_nodes_y)
                 '''用sp模型初始化的data作为特征值的权重'''
-                features.weight = nn.Parameter(torch.FloatTensor(feat_data), requires_grad = False)
+                features.weight = nn.Parameter(feat_data, requires_grad = False)
                 if use_cuda:
                     features = features.cuda()
 
-                agg1 = MeanAggregator(features, cuda = use_cuda)
-                enc1 = Encoder(features, num_nodes_y, hidden_dimension, sat_problem.adj_lists,
+                agg1 = MeanAggregator(features, device = device)
+                enc1 = Encoder(device, features, num_nodes_y, hidden_dimension, sat_problem.adj_lists,
                                sat_problem.node_adj_lists,
-                               agg1, gru = True, cuda = use_cuda)
-                agg2 = MeanAggregator(lambda nodes: enc1(nodes).t(), cuda = use_cuda)
-                enc2 = Encoder(lambda nodes: enc1(nodes).t(), enc1.embed_dim, hidden_dimension,
-                               sat_problem.adj_lists, sat_problem.node_adj_lists, agg2, base_model = enc1, gru = False,
-                               cuda = use_cuda)
+                               agg1, gru = True)
+                agg2 = MeanAggregator(lambda nodes: enc1(nodes).t(), device = device)
+                enc2 = Encoder(device, lambda nodes: enc1(nodes).t(), enc1.embed_dim, hidden_dimension,
+                               sat_problem.adj_lists, sat_problem.node_adj_lists, agg2, base_model = enc1, gru = False)
                 enc1.num_samples = 15
                 enc2.num_samples = 5
-                graphsage = SupervisedGraphSage(hidden_dimension, feature_dim, enc2, 'sp-nueral')
+                graphsage = SupervisedGraphSage(device, hidden_dimension, feature_dim, enc2, 'sp-nueral')
 
                 '''优化参数列表增加graphSAGE模型参数'''
                 optim_list.append({'params': filter(lambda p: p.requires_grad, graphsage.parameters())})
