@@ -354,7 +354,7 @@ class SatCNFEvaluator(nn.Module):
         self._sat = None
         self._increment = 0.6
         self._floor = nn.Parameter(torch.tensor([1], dtype = torch.float, device = self._device), requires_grad = False)
-        self._temperature = nn.Parameter(torch.tensor([10], dtype = torch.float, device = self._device),
+        self._temperature = nn.Parameter(torch.tensor([2], dtype = torch.float, device = self._device),
                                          requires_grad = False)
 
     def forward(self, variable_prediction, graph_map, batch_variable_map, batch_function_map, edge_feature,
@@ -406,9 +406,10 @@ class SatCNFEvaluator(nn.Module):
         variables = list(self._sat)
         functions = np.array(sat_problem.node_adj_lists)[variables]
         symbols = ((variable_prediction[variables] > 0.5).to(torch.float) * 2 - 1).to(torch.long)
-        try_times = 3
+        try_times = 5
         ending = ''
         function_num_addition = 0
+        flag = 1
         # indices = random.sample(range(len(variables)), math.floor(math.pow(self._temperature, self._increment)))
         if not is_training:
             try_times = 10
@@ -421,7 +422,8 @@ class SatCNFEvaluator(nn.Module):
             deactivate_varaibles = []
             for j in range(len(indices)):
                 i = indices[j]
-                pos_functions = np.array(functions[i][torch.tensor(functions[i]) * symbols[i] > 0].cpu()).flatten()
+                symbols_ = symbols * flag
+                pos_functions = np.array(functions[i][torch.tensor(functions[i]) * symbols_[i] > 0].cpu()).flatten()
                 if len(pos_functions) < len(functions[i]):
                     deactivate_varaibles.append(variables[i])
                 deactivate_functions.extend(np.abs(pos_functions) - 1)
@@ -439,6 +441,7 @@ class SatCNFEvaluator(nn.Module):
                     sat_str += ' 0\n'
             sat_str += ending
 
+            print('temperature: ', self._temperature)
             res = util.use_solver(sat_str)
             if res:
                 self._temperature += 1
@@ -459,6 +462,8 @@ class SatCNFEvaluator(nn.Module):
                     self._temperature -= 1
                 try_times -= 1
                 sat_problem.statistics[2] += 1
+                if sat_problem.statistics[2] >= 3:
+                    flag = -1
                 if try_times > 0:
                     for item in deactivate_varaibles:
                         variables.remove(item)
