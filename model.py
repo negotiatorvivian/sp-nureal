@@ -54,7 +54,7 @@ class SupervisedGraphSage(nn.Module):
     def loss(self, nodes, labels, sat_problem, is_train):
         scores = self.forward(nodes, sat_problem, is_train)
         # return self.lent(scores.squeeze(1), labels)
-        return self.lent(scores, ((labels + 1) / 2).to(torch.long).cuda())
+        return self.lent(scores, ((labels + 1) / 2).to(torch.long).to(self._device))
 
 
 def load_cora(dimacs_file):

@@ -279,7 +279,7 @@ class PropagatorDecimatorSolver(nn.Module):
 
 class SPNueralBase:
     def __init__(self, device, use_cuda, dimacs_file, validate_file = None, epoch_replication = 3, batch_replication = 1,
-                 epoch = 100, batch_size = 2000, hidden_dimension = 1, feature_dim = 100, train_outer_recurrence_num = 1,
+                 epoch = 100, batch_size = 2000, hidden_dimension = 1, feature_dim = 100, train_outer_recurrence_num = 5,
                  error_dim = 3):
         self._use_cuda = use_cuda
         '''读入数据路径'''

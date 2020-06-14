@@ -15,7 +15,7 @@ class Encoder(nn.Module):
         self.feat_dim = feature_dim
         '''与节点n相关的节点'''
         self.adj_lists = adj_lists
-        self.node_adj_lists = np.array(node_adj_lists)
+        self.node_adj_lists = np.array([l.numpy() for l in node_adj_lists])
         self.aggregator = aggregator
         '''训练节点n取与之相关节点的个数'''
         self.num_sample = num_sample
