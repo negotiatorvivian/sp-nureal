@@ -1,3 +1,4 @@
+# coding=utf-8
 import math
 import random
 
@@ -421,8 +422,9 @@ class SatCNFEvaluator(nn.Module):
             deactivate_varaibles = []
             for j in range(len(indices)):
                 i = indices[j]
-                pos_functions = np.array(functions[i][torch.tensor(functions[i]) * symbols[i] > 0].
-                                         to(self._device)).flatten()
+                temp = functions[i][torch.tensor(functions[i]) * symbols[i] > 0]
+                temp = temp.to(self._device) if torch.is_tensor(temp) else temp
+                pos_functions = np.array(temp).flatten()
                 if len(pos_functions) < len(functions[i]):
                     deactivate_varaibles.append(variables[i])
                 deactivate_functions.extend(np.abs(pos_functions) - 1)
