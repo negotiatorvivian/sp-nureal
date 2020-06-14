@@ -13,7 +13,7 @@ class MeanAggregator(nn.Module):
     def __init__(self, features, device, gru = False):
         super(MeanAggregator, self).__init__()
         self.features = features
-        self.device = device
+        self._device = device
         self.gru = gru
 
     def forward(self, nodes, to_neighs, num_sample = 10):
@@ -30,7 +30,7 @@ class MeanAggregator(nn.Module):
         '''去重'''
         unique_nodes_list = list(set.union(*samp_neighs))
         unique_nodes = {n: i for i, n in enumerate(unique_nodes_list)}
-        mask = Variable(torch.zeros(len(samp_neighs), len(unique_nodes), device = self.device))
+        mask = Variable(torch.zeros(len(samp_neighs), len(unique_nodes), device = self._device))
         '''获取变量节点的列坐标'''
         column_indices = [unique_nodes[n] for samp_neigh in samp_neighs for n in samp_neigh]
         row_indices = [i for i in range(len(samp_neighs)) for j in range(len(samp_neighs[i]))]
@@ -39,10 +39,8 @@ class MeanAggregator(nn.Module):
         mask = mask.div(num_neigh)
 
         '''self.features 是 一个nn.Embedding, 其权重 weight 为 [function_num, variable_num]'''
-        if self.cuda:
-            embed_matrix = self.features(torch.LongTensor(unique_nodes_list).cuda())
-        else:
-            embed_matrix = self.features(torch.LongTensor(unique_nodes_list))
+        embed_matrix = self.features(torch.tensor(unique_nodes_list, device = self._device, dtype = torch.long))
+
         to_feats = mask.mm(embed_matrix)
         return to_feats
 
@@ -58,7 +56,7 @@ class SurveyAggregator(nn.Module):
         self._eps = torch.tensor([1e-40], device = self._device)
         self._max_logit = torch.tensor([30.0], device = self._device)
         self._include_adaptors = include_adaptors
-        self._pi = torch.tensor([pi], dtype = torch.float32, device = device)
+        self._pi = torch.tensor([pi], dtype = torch.float32, device = self._device)
         self._previous_function_state = None
         self._embed_dim = embed_dimension
         '''用于loss计算 temperature -> 退火 刚开始影响因子很大 后逐渐变小'''
