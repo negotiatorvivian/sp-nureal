@@ -444,10 +444,12 @@ class SatCNFEvaluator(nn.Module):
 
             res = util.use_solver(sat_str)
             if res:
+                print('result: True')
                 self._temperature += 1
                 sat_problem.statistics[0] += 1
                 return res, (np.array(variables)[indices] + 1, (symbols[indices].squeeze() > 0))
             elif res is False:
+                print('result: False')
                 sat_problem.statistics[1] += 1
                 try_times -= 1
                 print(sat_problem.statistics, try_times)
@@ -458,6 +460,7 @@ class SatCNFEvaluator(nn.Module):
                 function_num_addition += 1
 
             else:
+                print('result: None')
                 if self._temperature > 0:
                     self._temperature -= 1
                 try_times -= 1

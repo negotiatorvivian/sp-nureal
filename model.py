@@ -75,7 +75,8 @@ def _module(model):
 
 
 def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, device, batch_replication, hidden_dimension,
-                feature_dim, train_outer_recurrence_num, use_cuda = True, is_train = True, randomized = True):
+                feature_dim, train_graph_recurrence_num, train_outer_recurrence_num, use_cuda = True, is_train = True,
+                randomized = True):
     np.random.seed(1)
     random.seed(1)
     '''优化参数列表'''
@@ -129,9 +130,9 @@ def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, de
                 optimizer.zero_grad()
                 nodes = [i for i in range(sat_problem._variable_num)]
                 # sample_length = int(len(nodes)/train_outer_recurrence_num)
-                for i in range(train_outer_recurrence_num):
+                for i in range(train_graph_recurrence_num):
                     loss += graphsage.loss(nodes, Variable(torch.FloatTensor(answers)), sat_problem,
-                                           i < (train_outer_recurrence_num + 1))
+                                           i < (train_graph_recurrence_num - 1))
             else:
                 # optimizer = torch.optim.SGD(optim_list, lr = 0.3, weight_decay = 0.01)
                 optimizer = torch.optim.Adam(optim_list, lr = 0.3, weight_decay = 0.01)

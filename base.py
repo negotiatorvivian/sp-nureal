@@ -279,8 +279,8 @@ class PropagatorDecimatorSolver(nn.Module):
 
 class SPNueralBase:
     def __init__(self, device, use_cuda, dimacs_file, validate_file = None, epoch_replication = 3, batch_replication = 1,
-                 epoch = 100, batch_size = 2000, hidden_dimension = 1, feature_dim = 100, train_outer_recurrence_num = 5,
-                 error_dim = 3):
+                 epoch = 100, batch_size = 2000, hidden_dimension = 1, feature_dim = 100, train_graph_recurrence_num = 3,
+                 train_outer_recurrence_num = 1, error_dim = 3):
         self._use_cuda = use_cuda
         '''读入数据路径'''
         self._dimacs_file = dimacs_file
@@ -295,6 +295,7 @@ class SPNueralBase:
         self._train_batch_limit = 20000
         self._test_batch_limit = 40000
         self._max_cache_size = 100000
+        self._train_graph_recurrence_num = train_graph_recurrence_num
         self._train_outer_recurrence_num = train_outer_recurrence_num
         self._device = device
         self._num_cores = multiprocessing.cpu_count()
@@ -379,6 +380,7 @@ class SPNueralBase:
                 losses[:, epoch, rep] = SPModel.train_batch(self, train_loader, total_loss, rep, epoch, self._model_list,
                                                             self._device, self._batch_replication,
                                                             self._hidden_dimension, self._feature_dim,
+                                                            self._train_graph_recurrence_num,
                                                             self._train_outer_recurrence_num, self._use_cuda, is_train,
                                                             True)
 
