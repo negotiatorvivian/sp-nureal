@@ -1,3 +1,4 @@
+# coding=utf-8
 import math
 import random
 
@@ -424,10 +425,9 @@ class SatCNFEvaluator(nn.Module):
             for j in range(len(indices)):
                 i = indices[j]
                 symbols_ = symbols * flag
-                pos_functions = np.array(functions[i][torch.tensor(functions[i]) * symbols_[i] > 0].cpu()).flatten()
-                # pos_functions = np.array(functions[i][torch.tensor(functions[i]) * symbols[i] > 0].
-                #                          to(self._device)).flatten()
-
+                temp = functions[i][torch.tensor(functions[i]) * symbols_[i] > 0]
+                temp = temp.cpu() if torch.is_tensor(temp) else temp
+                pos_functions = np.array(temp).flatten()
                 if len(pos_functions) < len(functions[i]):
                     deactivate_varaibles.append(variables[i])
                 deactivate_functions.extend(np.abs(pos_functions) - 1)
@@ -450,7 +450,8 @@ class SatCNFEvaluator(nn.Module):
             if res:
                 self._temperature += 1
                 sat_problem.statistics[0] += 1
-                return res, (np.array(variables)[indices] + 1, (symbols[indices].squeeze() > 0))
+                try_times -= 1
+                # return res, (np.array(variables)[indices] + 1, (symbols[indices].squeeze() > 0))
             elif res is False:
                 sat_problem.statistics[1] += 1
                 try_times -= 1
@@ -466,8 +467,8 @@ class SatCNFEvaluator(nn.Module):
                     self._temperature -= 1
                 try_times -= 1
                 sat_problem.statistics[2] += 1
-                if sat_problem.statistics[2] >= 3:
-                    flag = -1
+                # if sat_problem.statistics[2] >= 3:
+                #     flag = -1
                 if try_times > 0:
                     for item in deactivate_varaibles:
                         variables.remove(item)

@@ -131,7 +131,7 @@ def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, de
                 # sample_length = int(len(nodes)/train_outer_recurrence_num)
                 for i in range(train_outer_recurrence_num):
                     loss += graphsage.loss(nodes, Variable(torch.FloatTensor(answers)), sat_problem,
-                                           i < (train_outer_recurrence_num - 1))
+                                           i < (train_outer_recurrence_num + 1))
             else:
                 # optimizer = torch.optim.SGD(optim_list, lr = 0.3, weight_decay = 0.01)
                 optimizer = torch.optim.Adam(optim_list, lr = 0.3, weight_decay = 0.01)

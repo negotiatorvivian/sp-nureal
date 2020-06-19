@@ -114,7 +114,7 @@ class PropagatorDecimatorSolver(nn.Module):
             sat_problem._edge_mask = torch.mm(sat_problem._graph_mask_tuple[1], sat_problem._active_variables) * \
                                      torch.mm(sat_problem._graph_mask_tuple[3], sat_problem._active_functions)
 
-            if sat_problem._edge_mask.sum() < sat_problem._edge_num:
+            if sat_problem._edge_mask.sum() < sat_problem._edge_num and len(decimator_state) < 3:
                 decimator_state += (sat_problem._edge_mask,)
 
             if check_termination is not None:
