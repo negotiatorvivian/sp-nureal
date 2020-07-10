@@ -77,7 +77,7 @@ def _module(model):
 def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, device, batch_replication, hidden_dimension,
                 feature_dim, train_graph_recurrence_num, train_outer_recurrence_num, use_cuda = True, is_train = True,
                 randomized = True):
-    np.random.seed(1)
+    # np.random.seed(1)
     random.seed(1)
     '''优化参数列表'''
     optim_list = [{'params': filter(lambda p: p.requires_grad, model.parameters())} for model in model_list]
@@ -85,7 +85,7 @@ def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, de
     '''# 下标起始位置为1,每次读入为 dalaloader 里的一项'''
     for (j, data) in enumerate(data_loader, 1):
         segment_num = len(data[0])
-        print('CNF:', j)
+        print('Train CNF:', j)
         for seg in range(segment_num):
             '''将读进来的data放进gpu'''
             (graph_map, batch_variable_map, batch_function_map,
