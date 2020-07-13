@@ -124,7 +124,7 @@ def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, de
                 enc2.num_samples = 5
                 graphsage = SupervisedGraphSage(device, hidden_dimension, feature_dim, enc2, 'sp-nueral')
 
-                '''优化参数列表增加graphSAGE模型参数'''
+                '''优化参数列表增加 graphSAGE 模型参数'''
                 optim_list.append({'params': filter(lambda p: p.requires_grad, graphsage.parameters())})
                 optimizer = torch.optim.SGD(optim_list, lr = 0.3, weight_decay = 0.01)
                 optimizer.zero_grad()

@@ -405,8 +405,8 @@ class SatCNFEvaluator(nn.Module):
 
     def simplify(self, sat_problem, variable_prediction, is_training):
         variables = list(self._sat)
-        # functions = np.array([l.numpy() for l in sat_problem.node_adj_lists])[variables]
-        functions = np.array(sat_problem.node_adj_lists)[variables]
+        functions = np.array([l.numpy() for l in sat_problem.node_adj_lists])[variables]
+        # functions = np.array(sat_problem.node_adj_lists)[variables]
         symbols = ((variable_prediction[variables] > 0.5).to(torch.float) * 2 - 1).to(torch.long)
         try_times = 5
         ending = ''
@@ -466,7 +466,7 @@ class SatCNFEvaluator(nn.Module):
 
             else:
                 print('result: None')
-                if self._temperature > 0:
+                if self._temperature > 1:
                     self._temperature -= 1
                 try_times -= 1
                 sat_problem.statistics[2] += 1
