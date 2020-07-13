@@ -289,7 +289,7 @@ class SPNueralBase:
         self._batch_replication = batch_replication
         self._epoch = epoch
         self._batch_size = batch_size
-        self._hidden_dimension = 2 * hidden_dimension
+        self._hidden_dimension = hidden_dimension
         self._feature_dim = feature_dim
         '''以下 limit 设置是用于控制 data_loader 一次读入多少行数据'''
         self._train_batch_limit = 20000
