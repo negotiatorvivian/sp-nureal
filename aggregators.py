@@ -20,7 +20,7 @@ class MeanAggregator(nn.Module):
         _set = set
         if num_sample is not None:
             _sample = random.sample
-            samp_neighs = [_set(_sample(to_neigh, num_sample, )) if len(to_neigh) >= num_sample else to_neigh for
+            samp_neighs = [_set(_sample(to_neigh, num_sample, )) if len(to_neigh) >= num_sample else _set(to_neigh) for
                            to_neigh in to_neighs]
         else:
             samp_neighs = to_neighs
@@ -111,7 +111,7 @@ class SurveyAggregator(nn.Module):
         variable_state, function_state = init_state
 
         if self._include_adaptors:
-            decimator_variable_state = F.logsigmoid(self._function_input_projector(decimator_variable_state))
+            decimator_variable_state = F.logsigmoid(self._function_input_projector(decimator_variable_state))   # 子句对变量的影响通过self._function_input_projector 体现, logsigmoid < 0
         else:
             '''对子句编码 safe_log 防止变量里有无穷大值'''
             decimator_variable_state = self.safe_log(decimator_variable_state[:, 0]).unsqueeze(1)
@@ -119,12 +119,12 @@ class SurveyAggregator(nn.Module):
         if edge_mask is not None:
             decimator_variable_state = decimator_variable_state * edge_mask
 
-        aggregated_variable_state = torch.mm(function_mask, decimator_variable_state)
-        aggregated_variable_state = torch.mm(function_mask_transpose, aggregated_variable_state)
-        aggregated_variable_state = aggregated_variable_state - decimator_variable_state
+        aggregated_variable_state = torch.mm(function_mask, decimator_variable_state)  # (function_num, 1)
+        aggregated_variable_state = torch.mm(function_mask_transpose, aggregated_variable_state)  # (edge_num, 1)
+        aggregated_variable_state = aggregated_variable_state - decimator_variable_state  # decimator_variable_state 是每个边上的信息值, 将这个值传递给子句(第一个aggregated_variable_state), 然后在传递给边(第二个aggregated_variable_state) 两者相减获得信息熵(第三个aggregated_variable_state)
 
         function_state = mask * self.safe_exp(aggregated_variable_state) + (1 - mask) * function_state[:, 0].unsqueeze(
-            1)
+            1)  # mask 为1, function_state 为求 aggregated_variable_state 的指数
         if self._include_adaptors:
             decimator_function_state = self._variable_input_projector(decimator_function_state)
             decimator_function_state[:, 0] = torch.sigmoid(decimator_function_state[:, 0])

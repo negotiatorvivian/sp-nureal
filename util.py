@@ -128,7 +128,7 @@ class FactorGraphDataset(data.Dataset):
                 answers[misc_data] = 1
             else:
                 answers = misc_data
-        result = input_data[3]
+        result = True
 
         return (variable_num, function_num, graph_map, edge_feature, None, float(result), answers)
 

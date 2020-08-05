@@ -28,13 +28,11 @@ class SupervisedGraphSage(nn.Module):
     def forward(self, nodes, sat_problem, is_train):
         embeds = self.enc(nodes)
         scores = embeds.mm(self.weight)
-        signed_variable_mask_transpose, function_mask = SatLossEvaluator.compute_masks(sat_problem._graph_map, sat_problem._batch_variable_map,
-                                                                                       sat_problem._batch_function_map, sat_problem._edge_feature,
-                                                                                       self._device)
-        edge_values = scores + (1 - sat_problem._edge_feature) / 2
+        signed_variable_mask_transpose, function_mask = SatLossEvaluator.compute_masks(sat_problem._graph_map, sat_problem._batch_variable_map, sat_problem._batch_function_map, sat_problem._edge_feature, self._device)
 
+        edge_values = scores + (1 - sat_problem._edge_feature) / 2
         if not is_train:
-            solution = torch.mm(signed_variable_mask_transpose.to_dense().t(),edge_values)
+            solution = torch.mm(signed_variable_mask_transpose.to_dense().t(), edge_values)
             # if len(variables) != sat_problem._variable_num:
             #     solution = sat_problem._solution.detach()
             #     solution[nodes] = torch.tensor(variables, dtype = torch.float)
@@ -80,9 +78,7 @@ def _module(model):
     return model.module if isinstance(model, nn.DataParallel) else model
 
 
-def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, device, batch_replication, hidden_dimension,
-                feature_dim, train_graph_recurrence_num, train_outer_recurrence_num, use_cuda = True, is_train = True,
-                randomized = True):
+def train_batch(solver_base, data_loader, total_loss, rep, epoch, model_list, device, batch_replication, hidden_dimension, feature_dim, train_graph_recurrence_num, train_outer_recurrence_num, use_cuda = True, is_train = True, randomized = True):
     # np.random.seed(1)
 
     random.seed(1)
