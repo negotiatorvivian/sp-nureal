@@ -377,6 +377,7 @@ class SatCNFEvaluator(nn.Module):
             return res, ((max_sat == batch_values).float(), max_sat - batch_values, graph_map, clause_values), None
 
     def simplify(self, sat_problem, variable_prediction, is_training):
+
         variables = list(self._sat)  # variables 从 0 开始
         functions = np.array([l.numpy() for l in sat_problem.node_adj_lists])[variables]
         # functions = np.array(sat_problem.node_adj_lists)[variables]  # functions 从 1 开始
@@ -448,7 +449,7 @@ class SatCNFEvaluator(nn.Module):
 
             else:
                 print('result: None')
-                if self._temperature > 0:
+                if self._temperature > 1:
                     self._temperature -= 1
                 try_times -= 1
                 sat_problem.statistics[2] += 1
