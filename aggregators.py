@@ -10,17 +10,17 @@ import util
 
 class MeanAggregator(nn.Module):
 
-    def __init__(self, features, cuda = False, gru = False):
+    def __init__(self, features, device, gru = False):
         super(MeanAggregator, self).__init__()
         self.features = features
-        self.cuda = cuda
+        self._device = device
         self.gru = gru
 
     def forward(self, nodes, to_neighs, num_sample = 10):
         _set = set
         if num_sample is not None:
             _sample = random.sample
-            samp_neighs = [_set(_sample(to_neigh, num_sample, )) if len(to_neigh) >= num_sample else to_neigh for
+            samp_neighs = [_set(_sample(to_neigh, num_sample, )) if len(to_neigh) >= num_sample else _set(to_neigh) for
                            to_neigh in to_neighs]
         else:
             samp_neighs = to_neighs
@@ -30,21 +30,17 @@ class MeanAggregator(nn.Module):
         '''去重'''
         unique_nodes_list = list(set.union(*samp_neighs))
         unique_nodes = {n: i for i, n in enumerate(unique_nodes_list)}
-        mask = Variable(torch.zeros(len(samp_neighs), len(unique_nodes)))
+        mask = Variable(torch.zeros(len(samp_neighs), len(unique_nodes), device = self._device))
         '''获取变量节点的列坐标'''
         column_indices = [unique_nodes[n] for samp_neigh in samp_neighs for n in samp_neigh]
         row_indices = [i for i in range(len(samp_neighs)) for j in range(len(samp_neighs[i]))]
         mask[row_indices, column_indices] = 1
-        if self.cuda:
-            mask = mask.cuda()
         num_neigh = mask.sum(1, keepdim = True)
         mask = mask.div(num_neigh)
 
         '''self.features 是 一个nn.Embedding, 其权重 weight 为 [function_num, variable_num]'''
-        if self.cuda:
-            embed_matrix = self.features(torch.LongTensor(unique_nodes_list).cuda())
-        else:
-            embed_matrix = self.features(torch.LongTensor(unique_nodes_list))
+        embed_matrix = self.features(torch.tensor(unique_nodes_list, device = self._device, dtype = torch.long))
+
         to_feats = mask.mm(embed_matrix)
         return to_feats
 
@@ -60,7 +56,7 @@ class SurveyAggregator(nn.Module):
         self._eps = torch.tensor([1e-40], device = self._device)
         self._max_logit = torch.tensor([30.0], device = self._device)
         self._include_adaptors = include_adaptors
-        self._pi = torch.tensor([pi], dtype = torch.float32, device = device)
+        self._pi = torch.tensor([pi], dtype = torch.float32, device = self._device)
         self._previous_function_state = None
         self._embed_dim = embed_dimension
         '''用于loss计算 temperature -> 退火 刚开始影响因子很大 后逐渐变小'''
@@ -115,7 +111,7 @@ class SurveyAggregator(nn.Module):
         variable_state, function_state = init_state
 
         if self._include_adaptors:
-            decimator_variable_state = F.logsigmoid(self._function_input_projector(decimator_variable_state))
+            decimator_variable_state = F.logsigmoid(self._function_input_projector(decimator_variable_state))   # 子句对变量的影响通过self._function_input_projector 体现, logsigmoid < 0
         else:
             '''对子句编码 safe_log 防止变量里有无穷大值'''
             decimator_variable_state = self.safe_log(decimator_variable_state[:, 0]).unsqueeze(1)
@@ -123,12 +119,12 @@ class SurveyAggregator(nn.Module):
         if edge_mask is not None:
             decimator_variable_state = decimator_variable_state * edge_mask
 
-        aggregated_variable_state = torch.mm(function_mask, decimator_variable_state)
-        aggregated_variable_state = torch.mm(function_mask_transpose, aggregated_variable_state)
-        aggregated_variable_state = aggregated_variable_state - decimator_variable_state
+        aggregated_variable_state = torch.mm(function_mask, decimator_variable_state)  # (function_num, 1)
+        aggregated_variable_state = torch.mm(function_mask_transpose, aggregated_variable_state)  # (edge_num, 1)
+        aggregated_variable_state = aggregated_variable_state - decimator_variable_state  # decimator_variable_state 是每个边上的信息值, 将这个值传递给子句(第一个aggregated_variable_state), 然后在传递给边(第二个aggregated_variable_state) 两者相减获得信息熵(第三个aggregated_variable_state)
 
         function_state = mask * self.safe_exp(aggregated_variable_state) + (1 - mask) * function_state[:, 0].unsqueeze(
-            1)
+            1)  # mask 为1, function_state 为求 aggregated_variable_state 的指数
         if self._include_adaptors:
             decimator_function_state = self._variable_input_projector(decimator_function_state)
             decimator_function_state[:, 0] = torch.sigmoid(decimator_function_state[:, 0])
@@ -220,8 +216,10 @@ class SurveyAggregator(nn.Module):
             '''用norm_var_layer采样产生的data作为初始化数据'''
             # variable_state = self.norm_var_layer(torch.rand(edge_num, self._embed_dim, dtype = torch.float32))
             # function_state = self.norm_func_layer(torch.rand(edge_num, self._embed_dim, dtype = torch.float32))
-            variable_state = torch.rand(edge_num, self._function_message_dim, dtype = torch.float32)
-            function_state = torch.rand(edge_num, self._variable_message_dim, dtype = torch.float32)
+            variable_state = torch.rand(edge_num, self._function_message_dim, dtype = torch.float32,
+                                        device = self._device)
+            function_state = torch.rand(edge_num, self._variable_message_dim, dtype = torch.float32,
+                                        device = self._device)
             '''第二列数据用于表示外来影响因素(目前模型中没有,因此值为空)'''
             function_state[:, 1] = 0
         else:
@@ -398,7 +396,7 @@ class SurveyNeuralPredictor(nn.Module):
 
         if len(sat_problem._meta_data[0]) > 0:
             graph_feat = torch.sparse.FloatTensor(b_variable_mask._indices(), torch.tensor(np.concatenate(
-                np.array(sat_problem._meta_data)), dtype = torch.float)).to_dense()
+                np.array(sat_problem._meta_data)), device = self._device, dtype = torch.float)).to_dense()
             graph_feat = torch.sum(torch.mm(variable_mask_transpose, graph_feat), 1).unsqueeze(1)
 
         if len(decimator_state) == 3:

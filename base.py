@@ -3,14 +3,11 @@ import torch
 import torch.nn as nn
 import os
 import time
-import argparse
-import traceback
-import numpy as np
-from collections import defaultdict
 
+import numpy as np
 import model as SPModel
+import util
 from aggregators import SurveyAggregator, SurveyNeuralPredictor
-import util, solver
 
 
 def _module(model):
@@ -18,340 +15,14 @@ def _module(model):
     return model.module if isinstance(model, nn.DataParallel) else model
 
 
-class SATProblem(object):
-
-    def __init__(self, data_batch, device, batch_replication = 1):
-        self._device = device
-        self.batch_replication = batch_replication
-        self.setup_problem(data_batch, batch_replication)
-        self._edge_mask = None
-        self._is_sat = 0.5 * torch.ones(self._batch_size, device = self._device)
-        self._cnf_evaluator = solver.SatCNFEvaluator(device)
-
-    def setup_problem(self, data_batch, batch_replication):
-        """
-        根据读入文件建立一个sat_problem类
-        """
-        '''batch_replication > 1, 将数据重复batch_replication次数'''
-        if batch_replication > 1:
-            self._replication_mask_tuple = self._compute_batch_replication_map(data_batch[1], batch_replication)
-            self._graph_map, self._batch_variable_map, self._batch_function_map, self._edge_feature, self._meta_data, _ \
-                = self._replicate_batch(data_batch, batch_replication)
-        else:
-            self._graph_map, self._batch_variable_map, self._batch_function_map, self._edge_feature, self._meta_data, _ \
-                = data_batch
-
-        self._variable_num = self._batch_variable_map.size()[0]
-        self._function_num = self._batch_function_map.size()[0]
-        self._edge_num = self._graph_map.size()[1]
-
-        '''# 以下为关于变量和子句的编码, 数据类型为稀疏矩阵'''
-        self._vf_mask_tuple = self._compute_variable_function_map(self._graph_map, self._batch_variable_map,
-                                                                  self._batch_function_map, self._edge_feature)
-        self._batch_mask_tuple = self._compute_batch_map(self._batch_variable_map, self._batch_function_map)
-        self._graph_mask_tuple = self._compute_graph_mask(self._graph_map, self._batch_variable_map,
-                                                          self._batch_function_map,
-                                                          degree = True)
-        '''# 所有edge_feature为正的子句'''
-        self._pos_mask_tuple = self._compute_graph_mask(self._graph_map, self._batch_variable_map,
-                                                        self._batch_function_map,
-                                                        (self._edge_feature == 1).squeeze(1).float())
-        '''# 所有edge_feature为负的子句'''
-        self._neg_mask_tuple = self._compute_graph_mask(self._graph_map, self._batch_variable_map,
-                                                        self._batch_function_map,
-                                                        (self._edge_feature == -1).squeeze(1).float())
-        self._signed_mask_tuple = self._compute_graph_mask(self._graph_map, self._batch_variable_map,
-                                                           self._batch_function_map, self._edge_feature.squeeze(1))
-
-        self._active_variables = torch.ones(self._variable_num, 1, device = self._device)
-        self._active_functions = torch.ones(self._function_num, 1, device = self._device)
-        self._solution = 0.5 * torch.ones(self._variable_num, device = self._device)
-
-        self._batch_size = (self._batch_variable_map.max() + 1).long().item()
-        '''# 与某个节点n有关的所有节点->与变量n同时出现在一个子句中'''
-        self.adj_lists, self.node_adj_lists = self._compute_adj_list()
-
-    def _replicate_batch(self, data_batch, batch_replication):
-        """batch_replication 将一组数据重复多次"""
-
-        graph_map, batch_variable_map, batch_function_map, edge_feature, meta_data, label = data_batch
-        edge_num = graph_map.size()[1]
-        batch_size = (batch_variable_map.max() + 1).long().item()
-        variable_num = batch_variable_map.size()[0]
-        function_num = batch_function_map.size()[0]
-
-        ind = torch.arange(batch_replication, dtype = torch.int32, device = self._device).unsqueeze(1). \
-            repeat(1, edge_num).view(1, -1)
-        graph_map = graph_map.repeat(1, batch_replication) + ind.repeat(2, 1) * torch.tensor(
-            [[variable_num], [function_num]], dtype = torch.int32, device = self._device)
-
-        ind = torch.arange(batch_replication, dtype = torch.int32, device = self._device).unsqueeze(1). \
-            repeat(1, variable_num).view(1, -1)
-        batch_variable_map = batch_variable_map.repeat(batch_replication) + ind * batch_size
-        ind = torch.arange(batch_replication, dtype = torch.int32, device = self._device).unsqueeze(1). \
-            repeat(1, function_num).view(1, -1)
-        batch_function_map = batch_function_map.repeat(batch_replication) + ind * batch_size
-        edge_feature = edge_feature.repeat(batch_replication, 1)
-
-        if meta_data is not None:
-            meta_data = torch.tensor(np.concatenate(meta_data)).repeat(batch_replication, 1)
-
-        if label is not None:
-            label = label.repeat(batch_replication, 1)
-
-        return graph_map, batch_variable_map.squeeze(0), batch_function_map.squeeze(0), edge_feature, meta_data, label
-
-    def _compute_batch_replication_map(self, batch_variable_map, batch_replication):
-        batch_size = (batch_variable_map.max() + 1).long().item()
-        x_ind = torch.arange(batch_size * batch_replication, dtype = torch.int64, device = self._device)
-        y_ind = torch.arange(batch_size, dtype = torch.int64, device = self._device).repeat(batch_replication)
-        ind = torch.stack([x_ind, y_ind])
-        all_ones = torch.ones(batch_size * batch_replication, device = self._device)
-
-        if self._device.type == 'cuda':
-            mask = torch.cuda.sparse.FloatTensor(ind, all_ones,
-                                                 torch.Size([batch_size * batch_replication, batch_size]),
-                                                 device = self._device)
-        else:
-            mask = torch.sparse.FloatTensor(ind, all_ones,
-                                            torch.Size([batch_size * batch_replication, batch_size]),
-                                            device = self._device)
-
-        mask_transpose = mask.transpose(0, 1)
-        return (mask, mask_transpose)
-
-    def _compute_variable_function_map(self, graph_map, batch_variable_map, batch_function_map, edge_feature):
-        """_variable_function_map 为子句和变量关联的矩阵"""
-        edge_num = graph_map.size()[1]
-        variable_num = batch_variable_map.size()[0]
-        function_num = batch_function_map.size()[0]
-        all_ones = torch.ones(edge_num, device = self._device)
-
-        if self._device.type == 'cuda':
-            mask = torch.cuda.sparse.FloatTensor(graph_map.long(), all_ones,
-                                                 torch.Size([variable_num, function_num]), device = self._device)
-            signed_mask = torch.cuda.sparse.FloatTensor(graph_map.long(), edge_feature.squeeze(1),
-                                                        torch.Size([variable_num, function_num]), device = self._device)
-        else:
-            mask = torch.sparse.FloatTensor(graph_map.long(), all_ones,
-                                            torch.Size([variable_num, function_num]), device = self._device)
-            signed_mask = torch.sparse.FloatTensor(graph_map.long(), edge_feature.squeeze(1),
-                                                   torch.Size([variable_num, function_num]), device = self._device)
-
-        mask_transpose = mask.transpose(0, 1)
-        signed_mask_transpose = signed_mask.transpose(0, 1)
-
-        return mask, mask_transpose, signed_mask, signed_mask_transpose
-
-    def _compute_batch_map(self, batch_variable_map, batch_function_map):
-        variable_num = batch_variable_map.size()[0]
-        function_num = batch_function_map.size()[0]
-        variable_all_ones = torch.ones(variable_num, device = self._device)
-        function_all_ones = torch.ones(function_num, device = self._device)
-        variable_range = torch.arange(variable_num, dtype = torch.int64, device = self._device)
-        function_range = torch.arange(function_num, dtype = torch.int64, device = self._device)
-        batch_size = (batch_variable_map.max() + 1).long().item()
-
-        variable_sparse_ind = torch.stack([variable_range, batch_variable_map.long()])
-        function_sparse_ind = torch.stack([function_range, batch_function_map.long()])
-
-        if self._device.type == 'cuda':
-            variable_mask = torch.cuda.sparse.FloatTensor(variable_sparse_ind, variable_all_ones,
-                                                          torch.Size([variable_num, batch_size]), device = self._device)
-            function_mask = torch.cuda.sparse.FloatTensor(function_sparse_ind, function_all_ones,
-                                                          torch.Size([function_num, batch_size]), device = self._device)
-        else:
-            variable_mask = torch.sparse.FloatTensor(variable_sparse_ind, variable_all_ones,
-                                                     torch.Size([variable_num, batch_size]), device = self._device)
-            function_mask = torch.sparse.FloatTensor(function_sparse_ind, function_all_ones,
-                                                     torch.Size([function_num, batch_size]), device = self._device)
-
-        variable_mask_transpose = variable_mask.transpose(0, 1)
-        function_mask_transpose = function_mask.transpose(0, 1)
-
-        return variable_mask, variable_mask_transpose, function_mask, function_mask_transpose
-
-    def _compute_graph_mask(self, graph_map, batch_variable_map, batch_function_map, edge_values = None,
-                            degree = False):
-        """_graph_mask表示变量-子句-edge的关系"""
-        edge_num = graph_map.size()[1]
-        variable_num = batch_variable_map.size()[0]
-        function_num = batch_function_map.size()[0]
-        neg_prop_flag = False
-
-        if edge_values is None:
-            edge_values = torch.ones(edge_num, device = self._device)
-        else:
-            neg_prop_flag = True
-
-        edge_num_range = torch.arange(edge_num, dtype = torch.int64, device = self._device)
-
-        variable_sparse_ind = torch.stack([graph_map[0, :].long(), edge_num_range])
-        function_sparse_ind = torch.stack([graph_map[1, :].long(), edge_num_range])
-
-        if self._device.type == 'cuda':
-            variable_mask = torch.cuda.sparse.FloatTensor(variable_sparse_ind, edge_values,
-                                                          torch.Size([variable_num, edge_num]), device = self._device)
-            function_mask = torch.cuda.sparse.FloatTensor(function_sparse_ind, edge_values,
-                                                          torch.Size([function_num, edge_num]), device = self._device)
-        else:
-            variable_mask = torch.sparse.FloatTensor(variable_sparse_ind, edge_values,
-                                                     torch.Size([variable_num, edge_num]), device = self._device)
-            function_mask = torch.sparse.FloatTensor(function_sparse_ind, edge_values,
-                                                     torch.Size([function_num, edge_num]), device = self._device)
-        if degree:
-            self.degree = torch.sum(variable_mask.to_dense(), dim = 1)
-        if neg_prop_flag:
-            self.neg_prop = torch.sum(variable_mask.to_dense(), dim = 1)
-
-        variable_mask_transpose = variable_mask.transpose(0, 1)
-        function_mask_transpose = function_mask.transpose(0, 1)
-
-        return variable_mask, variable_mask_transpose, function_mask, function_mask_transpose
-
-    def _peel(self):
-
-        vf_map, vf_map_transpose, signed_vf_map, _ = self._vf_mask_tuple
-        '''子句中有几个变量'''
-        variable_degree = torch.mm(vf_map, self._active_functions)
-        signed_variable_degree = torch.mm(signed_vf_map, self._active_functions)
-
-        while True:
-            single_variables = (variable_degree == signed_variable_degree.abs()).float() * self._active_variables
-
-            if torch.sum(single_variables) <= 0:
-                break
-
-            single_functions = (torch.mm(vf_map_transpose, single_variables) > 0).float() * self._active_functions
-            degree_delta = torch.mm(vf_map, single_functions) * self._active_variables
-            signed_degree_delta = torch.mm(signed_vf_map, single_functions) * self._active_variables
-            self._solution[single_variables[:, 0] == 1] = (signed_variable_degree[
-                                                               single_variables[:, 0] == 1, 0].sign() + 1) / 2.0
-
-            variable_degree -= degree_delta
-            signed_variable_degree -= signed_degree_delta
-
-            self._active_variables[single_variables[:, 0] == 1, 0] = 0
-            self._active_functions[single_functions[:, 0] == 1, 0] = 0
-
-    def _set_variable_core(self, assignment):
-        """固定某些可以确定的值"""
-
-        _, vf_map_transpose, _, signed_vf_map_transpose = self._vf_mask_tuple
-
-        assignment *= self._active_variables
-
-        '''# 计算子句节点的输入(无符号)'''
-        input_num = torch.mm(vf_map_transpose, assignment.abs())
-
-        '''# 计算子句节点的输入(有符号)'''
-        function_eval = torch.mm(signed_vf_map_transpose, assignment)
-
-        deactivated_functions = (function_eval > -input_num).float() * self._active_functions
-
-        self._active_variables[assignment[:, 0].abs() == 1, 0] = 0
-        self._active_functions[deactivated_functions[:, 0] == 1, 0] = 0
-
-        '''更新解'''
-        self._solution[assignment[:, 0].abs() == 1] = (assignment[assignment[:, 0].abs() == 1, 0] + 1) / 2.0
-
-    def _propagate_single_clauses(self):
-        "Implements unit clause propagation algorithm."
-
-        vf_map, vf_map_transpose, signed_vf_map, _ = self._vf_mask_tuple
-        b_variable_mask, b_variable_mask_transpose, b_function_mask, _ = self._batch_mask_tuple
-
-        while True:
-            function_degree = torch.mm(vf_map_transpose, self._active_variables)
-            single_functions = (function_degree == 1).float() * self._active_functions
-
-            if torch.sum(single_functions) <= 0:
-                break
-            input_num = torch.mm(vf_map, single_functions)
-
-            '''有符号的变量值'''
-            variable_eval = torch.mm(signed_vf_map, single_functions)
-
-            '''判断是否有冲突的子句或变量'''
-            conflict_variables = (variable_eval.abs() != input_num).float() * self._active_variables
-            if torch.sum(conflict_variables) > 0:
-                '''是否有不可解的子句'''
-                unsat_examples = torch.mm(b_variable_mask_transpose, conflict_variables)
-                self._is_sat[unsat_examples[:, 0] >= 1] = 0
-
-                '''将不可解的子句关联到不满足的集合中'''
-                unsat_functions = torch.mm(b_function_mask, unsat_examples) * self._active_functions
-                self._active_functions[unsat_functions[:, 0] == 1, 0] = 0
-
-                '''根据不满足的子句集合 -> 不满足的变量集合'''
-                unsat_variables = torch.mm(b_variable_mask, unsat_examples) * self._active_variables
-                self._active_variables[unsat_variables[:, 0] == 1, 0] = 0
-
-            '''计算活跃变量的值'''
-            assigned_variables = (variable_eval.abs() == input_num).float() * self._active_variables
-
-            '''计算所有变量赋值'''
-            assignment = torch.sign(variable_eval) * assigned_variables
-
-            '''确定的变量 -> 确定的子句'''
-            self._active_functions[single_functions[:, 0] == 1, 0] = 0
-
-            '''根据 assignment 确定相关的变量的值'''
-            self._set_variable_core(assignment)
-
-    def set_variables(self, assignment):
-        """将某些变量值确定"""
-        self._set_variable_core(assignment)
-        self.simplify()
-
-    def simplify(self):
-        """化简 CNF """
-        self._propagate_single_clauses()
-        self._peel()
-
-    def _compute_adj_list(self):
-        """计算与变量 n 同时出现在某一个子句中的变量集合"""
-        adj_lists = defaultdict(set)
-        node_list = []
-        self.nodes = ((self._signed_mask_tuple[0]._indices()[0].to(torch.float) + 1) * self._edge_feature.squeeze(1)) \
-            .to(torch.long)
-        for j in range(self._variable_num):
-            indices = self._graph_map[1][np.argwhere(torch.abs(self.nodes) == j + 1)][0].to(torch.long)
-            functions = np.array(self._vf_mask_tuple[3].to(torch.long).to_dense()[indices, :][:, j] * (indices + 1))
-            node_list.append(functions + 1)
-            edge_indices = np.argwhere(self._signed_mask_tuple[2].to_dense()[indices] != 0)[1]
-            relations = set([abs(i) - 1 for i in self.nodes[edge_indices].numpy()])
-            if len(relations) < 2:
-                continue
-            adj_lists[j] = relations - set([j])
-        return adj_lists, node_list
-
-    def _post_process_predictions(self, prediction, is_training = True):
-        """计算 cnf 中可满足的子句数"""
-        output, res, activations = self._cnf_evaluator(prediction, self._graph_map, self._batch_variable_map,
-                                                       self._batch_function_map, self._edge_feature,
-                                                       self._vf_mask_tuple[1], self._graph_mask_tuple[3],
-                                                       self._active_variables, self._active_functions, self, is_training)
-
-        if res is None:
-            return None
-        # unsat_clause_num, graph_map, clause_values = [a.detach().cpu().numpy() for a in res]
-        if activations is not None:
-            trained_vars, certain_vars = activations
-            print('sat:', output, '\ncertain_vars:', certain_vars)
-            '''若res不为空, trained_vars表示所有不满足子句中出现过的变量'''
-            return trained_vars, output, certain_vars
-
-
-class PropagatorDecimatorSolverBase(nn.Module):
+class PropagatorDecimatorSolver(nn.Module):
     """SP-NUERAL Solver 的基类"""
 
     def __init__(self, device, name, feature_dim, hidden_dimension,
                  agg_hidden_dimension = 100, func_hidden_dimension = 100, agg_func_dimension = 50,
-                 classifier_dimension = 50, local_search_iterations = 1000, epsilon = 0.05, alpha = 0.1,
-                 pure_sp = True):
+                 classifier_dimension = 50, local_search_iterations = 1000, pure_sp = True):
 
-        super(PropagatorDecimatorSolverBase, self).__init__()
+        super(PropagatorDecimatorSolver, self).__init__()
         self._device = device
         self._module_list = nn.ModuleList()
         self._edge_dimension = 1
@@ -367,13 +38,16 @@ class PropagatorDecimatorSolverBase(nn.Module):
         self._predictor = SurveyNeuralPredictor(device, hidden_dimension, self._predict_dimension, self._edge_dimension,
                                                 self._meta_dimension, agg_hidden_dimension, func_hidden_dimension,
                                                 agg_func_dimension, self._variable_classifier)
-        self._cnf_evaluator = solver.SatCNFEvaluator(device)
-        self._loss_evaluator = solver.SatLossEvaluator(alpha = alpha, device = self._device)
+        # self._cnf_evaluator = solver.SatCNFEvaluator(device)
+        # self._loss_evaluator = solver.SatLossEvaluator(alpha = alpha, device = self._device)
 
         self._module_list.append(self._propagator)
         self._module_list.append(self._predictor)
 
-        self._global_step = nn.Parameter(torch.tensor([0], dtype = torch.float, device = self._device), requires_grad = False)
+        self._global_step = nn.Parameter(torch.tensor([0], dtype = torch.float, device = self._device),
+                                         requires_grad = False)
+        # self._temperature = nn.Parameter(torch.tensor([temperature], dtype = torch.float, device = self._device),
+        #                                  requires_grad = False)
         self._name = name
         self._local_search_iterations = local_search_iterations
         self._eps = 1e-8 * torch.ones(1, device = self._device, requires_grad = False)
@@ -440,7 +114,7 @@ class PropagatorDecimatorSolverBase(nn.Module):
             sat_problem._edge_mask = torch.mm(sat_problem._graph_mask_tuple[1], sat_problem._active_variables) * \
                                      torch.mm(sat_problem._graph_mask_tuple[3], sat_problem._active_functions)
 
-            if sat_problem._edge_mask.sum() < sat_problem._edge_num:
+            if sat_problem._edge_mask.sum() < sat_problem._edge_num and len(decimator_state) < 3:
                 decimator_state += (sat_problem._edge_mask,)
 
             if check_termination is not None:
@@ -532,55 +206,60 @@ class PropagatorDecimatorSolverBase(nn.Module):
 
         return (assignment + 1) / 2.0, prediction[1]
 
-    def _check_recurrence_termination(self, active, prediction, sat_problem):
-        """停用模型已找到SAT解决方案的CNF"""
+    # def _check_recurrence_termination(self, active, prediction, sat_problem):
+    #     """停用模型已找到SAT解决方案的CNF"""
+    #
+    #     _, res, _ = self._cnf_evaluator(variable_prediction = prediction[0],
+    #                                                  graph_map = sat_problem._graph_map,
+    #                                                  batch_variable_map = sat_problem._batch_variable_map,
+    #                                                  batch_function_map = sat_problem._batch_function_map,
+    #                                                  edge_feature = sat_problem._edge_feature,
+    #                                                  meta_data = sat_problem._meta_data, is_training = False)
+    #     # .detach().cpu().numpy()
+    #
+    #     if sat_problem._batch_replication > 1:
+    #         real_batch = torch.mm(sat_problem._replication_mask_tuple[1], (res[0] > 0.5).float())
+    #         dup_batch = torch.mm(sat_problem._replication_mask_tuple[0], (real_batch == 0).float())
+    #         active[active[:, 0], 0] = (dup_batch[active[:, 0], 0] > 0)
+    #     else:
+    #         active[active[:, 0], 0] = (res[0][active[:, 0], 0] <= 0.5)
 
-        output, _ = self._cnf_evaluator(variable_prediction = prediction[0], graph_map = sat_problem._graph_map,
-                                        batch_variable_map = sat_problem._batch_variable_map,
-                                        batch_function_map = sat_problem._batch_function_map,
-                                        edge_feature = sat_problem._edge_feature,
-                                        meta_data = sat_problem._meta_data)  # .detach().cpu().numpy()
+    # def _compute_evaluation_metrics(self, model, evaluator, prediction, label, sat_problem):
+    #     return evaluator(model, prediction, label, sat_problem)
 
-        if sat_problem._batch_replication > 1:
-            real_batch = torch.mm(sat_problem._replication_mask_tuple[1], (output > 0.5).float())
-            dup_batch = torch.mm(sat_problem._replication_mask_tuple[0], (real_batch == 0).float())
-            active[active[:, 0], 0] = (dup_batch[active[:, 0], 0] > 0)
-        else:
-            active[active[:, 0], 0] = (output[active[:, 0], 0] <= 0.5)
+    # def _compute_evaluation_metrics(self, prediction, label, graph_map, batch_variable_map,
+    #                                 batch_function_map, edge_feature, meta_data, vf_mask, sat_problem = None):
+    #     """交叉验证"""
+    #     _, res, _ = self._cnf_evaluator(variable_prediction = prediction, graph_map = graph_map,
+    #                                                  batch_variable_map = batch_variable_map,
+    #                                                  batch_function_map = batch_function_map,
+    #                                                  edge_feature = edge_feature, vf_mask = vf_mask,
+    #                                                  sat_problem = sat_problem, is_training = False)
+    #     # self._temperature = temperature
+    #     recall = torch.sum(label * ((res[0] > 0.5).float() - label).abs()) / torch.max(torch.sum(label), self._eps)
+    #     accuracy = nn.L1Loss((res[0] > 0.5).float(), label).unsqueeze(0)
+    #     loss_value = self._loss_evaluator(variable_prediction = prediction, label = label, graph_map = graph_map,
+    #                                       batch_variable_map = batch_variable_map,
+    #                                       batch_function_map = batch_function_map,
+    #                                       edge_feature = edge_feature, meta_data = meta_data,
+    #                                       global_step = self._global_step, eps = self._eps).unsqueeze(0)
+    #     return torch.cat([accuracy, recall, loss_value], 0)
 
-    def _compute_evaluation_metrics(self, evaluator, prediction, label, graph_map, batch_variable_map,
-                                    batch_function_map, edge_feature, meta_data, vf_mask, sat_problem = None):
-        """交叉验证"""
-        output, _ = self._cnf_evaluator(variable_prediction = prediction, graph_map = graph_map,
-                                        batch_variable_map = batch_variable_map,
-                                        batch_function_map = batch_function_map,
-                                        edge_feature = edge_feature, vf_mask = vf_mask, sat_problem = sat_problem)
+    # def compute_loss(self, model, loss, mode, prediction, label, sat_problem = None):
+    #     return loss(prediction, label)
 
-        recall = torch.sum(label * ((output[0] > 0.5).float() - label).abs()) / torch.max(torch.sum(label), self._eps)
-        accuracy = evaluator((output[0] > 0.5).float(), label).unsqueeze(0)
-        loss_value = self._loss_evaluator(variable_prediction = prediction, label = label, graph_map = graph_map,
-                                          batch_variable_map = batch_variable_map,
-                                          batch_function_map = batch_function_map,
-                                          edge_feature = edge_feature, meta_data = meta_data,
-                                          global_step = self._global_step, eps = self._eps).unsqueeze(0)
-        return torch.cat([accuracy, recall, loss_value], 0)
-
-    def compute_loss(self, mode, prediction, label, graph_map, batch_variable_map, batch_function_map,
-                     edge_feature, meta_data = None, vf_mask = None, sat_problem = None):
-        if mode:
-            '''训练集'''
-            res = self._loss_evaluator(variable_prediction = prediction, label = label, graph_map = graph_map,
-                                       batch_variable_map = batch_variable_map, batch_function_map = batch_function_map,
-                                       edge_feature = edge_feature, meta_data = meta_data, global_step =
-                                       self._global_step, eps = self._eps)
-
-            return res
-        else:
-            '''验证集'''
-            evaluator = nn.L1Loss()
-            res = self._compute_evaluation_metrics(evaluator, prediction, label, graph_map, batch_variable_map,
-                                                   batch_function_map, edge_feature, meta_data, vf_mask, sat_problem)
-            return res.cpu().numpy()
+    # def compute_loss(self, mode, prediction, label, sat_problem = None):
+    #     if mode:
+    #         '''训练集'''
+    #         res = self._loss_evaluator(sat_problem._graph_map,sat_problem._batch_variable_map,
+    #                                    sat_problem._batch_function_map, sat_problem._edge_feature, sat_problem._meta_data,
+    #                                    global_step = self._global_step, eps = self._eps)
+    #
+    #         return res
+    #     else:
+    #         '''验证集'''
+    #         res = self._compute_evaluation_metrics(prediction, label, sat_problem)
+    #         return res.cpu().numpy()
 
     def get_init_state(self, graph_map, randomized, batch_replication = 1):
         """初始化变量子节点和子句子节点"""
@@ -599,33 +278,31 @@ class PropagatorDecimatorSolverBase(nn.Module):
 
 
 class SPNueralBase:
-    def __init__(self, dimacs_file, validate_file = None, epoch_replication = 3, batch_replication = 1, epoch = 100,
-                 batch_size = 2000, hidden_dimension = 1, feature_dim = 100, train_outer_recurrence_num = 5,
-                 alpha = 0.1, error_dim = 3, use_cuda = True):
-        self._use_cuda = use_cuda and torch.cuda.is_available()
+    def __init__(self, device, use_cuda, dimacs_file, validate_file = None, epoch_replication = 3, batch_replication = 1,
+                 epoch = 100, batch_size = 2000, hidden_dimension = 1, feature_dim = 100, train_graph_recurrence_num = 3,
+                 train_outer_recurrence_num = 1, error_dim = 3):
+        self._use_cuda = use_cuda
         '''读入数据路径'''
         self._dimacs_file = dimacs_file
         self._validate_file = validate_file
-
         self._epoch_replication = epoch_replication
         self._batch_replication = batch_replication
         self._epoch = epoch
         self._batch_size = batch_size
-        self._hidden_dimension = 2 * hidden_dimension
-        self._gru_hidden_dimension = hidden_dimension
+        self._hidden_dimension = hidden_dimension
         self._feature_dim = feature_dim
         '''以下 limit 设置是用于控制 data_loader 一次读入多少行数据'''
         self._train_batch_limit = 20000
         self._test_batch_limit = 40000
         self._max_cache_size = 100000
+        self._train_graph_recurrence_num = train_graph_recurrence_num
         self._train_outer_recurrence_num = train_outer_recurrence_num
-        self._device = torch.device('cuda') if self._use_cuda else torch.device('cpu')
+        self._device = device
         self._num_cores = multiprocessing.cpu_count()
         self._error_dim = error_dim
         torch.set_num_threads(self._num_cores)
         '''初始化模型列表'''
-        model_list = [PropagatorDecimatorSolverBase(self._device, "SP-Nueral", feature_dim, self._gru_hidden_dimension,
-                                                    alpha = alpha, pure_sp = False)]
+        model_list = [PropagatorDecimatorSolver(self._device, "sp-nueral-solver", self._feature_dim, hidden_dimension)]
         '''将模型放到 GPU 上运行 如果 cuda 设备可用'''
         self._model_list = [self._set_device(model) for model in model_list]
 
@@ -650,11 +327,17 @@ class SPNueralBase:
         for model in self._model_list:
             _module(model)._global_step.data = torch.tensor([0], dtype = torch.float, device = self._device)
 
+    def _compute_evaluation_metrics(self, model, evaluator, prediction, label, sat_problem):
+        return evaluator(model, prediction, label, sat_problem)
+
+    def _compute_loss(self, model, loss, mode, prediction, label, sat_problem = None):
+        return loss(prediction, label)
+
     def _test_epoch(self, validation_loader, is_train = False, batch_replication = 1):
         """用于做模型的验证"""
         with torch.no_grad():
             error = np.zeros((self._error_dim, len(self._model_list)), dtype = np.float32)
-            errors = SPModel.test_batch(validation_loader, error, self._model_list, self._device, batch_replication,
+            errors = SPModel.test_batch(self, validation_loader, error, self._model_list, self._device, batch_replication,
                                         self._use_cuda, is_train, False)
             return errors
 
@@ -694,9 +377,10 @@ class SPNueralBase:
             for epoch in range(self._epoch):
                 start_time = time.time()
                 total_loss = np.zeros(len(self._model_list), dtype = np.float32)
-                losses[:, epoch, rep] = SPModel.train_batch(train_loader, total_loss, rep, epoch, self._model_list,
+                losses[:, epoch, rep] = SPModel.train_batch(self, train_loader, total_loss, rep, epoch, self._model_list,
                                                             self._device, self._batch_replication,
                                                             self._hidden_dimension, self._feature_dim,
+                                                            self._train_graph_recurrence_num,
                                                             self._train_outer_recurrence_num, self._use_cuda, is_train,
                                                             True)
 
@@ -751,32 +435,3 @@ class SPNueralBase:
 
             SPModel.predict_batch(test_loader, self._model_list, self._device, epoch_replication, self._use_cuda,
                                   randomized = randomized)
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('dataset_path', help = 'Path to datasets')
-    parser.add_argument('-tv', '--validate', help = 'Path to validation datasets')
-    parser.add_argument('-tl', '--last_model_path', help = 'Path to save the previous model')
-    parser.add_argument('-tb', '--best_model_path', help = 'Path to save the best model')
-    parser.add_argument('-g', '--gpu_mode', help = 'Run on GPU', action = 'store_true')
-    parser.add_argument('-p', '--predict', help = 'Run prediction', action = 'store_true')
-    parser.add_argument('-l', '--load_model', help = 'Load the previous model')
-    parser.add_argument('-pl', '--load_model_path', help = 'Path to load the previous model')
-
-    args = parser.parse_args()
-    try:
-        '''训练模式'''
-        if not args.predict:
-            '''检查必须的参数, 若缺失任意一个参数, 则抛出异常'''
-            assert args.last_model_path and args.best_model_path and args.validate
-            trainer = SPNueralBase(args.dataset_path, args.validate, use_cuda = args.gpu_mode)
-            trainer.train(args.last_model_path, args.best_model_path)
-        else:
-            '''预测模式'''
-            trainer = SPNueralBase(args.dataset_path, use_cuda = args.gpu_mode)
-            '''检查必须的参数, 若缺失任意一个参数, 则抛出异常'''
-            assert args.load_model_path
-            trainer.predict(import_path_base = args.load_model_path)
-    except:
-        print(traceback.format_exc())
